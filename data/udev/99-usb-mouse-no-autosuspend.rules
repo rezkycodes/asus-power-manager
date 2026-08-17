@@ -1,0 +1,3 @@
+# Disable USB autosuspend for USB input devices
+ACTION=="add", SUBSYSTEM=="usb", ATTR{bInterfaceClass}=="03", ATTR{../power/control}="on"
+ACTION=="add", SUBSYSTEM=="usb", ATTRS{idVendor}=="046d", ATTR{power/control}="on"

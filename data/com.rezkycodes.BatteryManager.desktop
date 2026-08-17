@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=Power & Battery Manager
+GenericName=Battery & Performance Control
+Comment=Kontrol Status Baterai, Mode Hemat Daya, dan Performa Laptop ASUS
+Exec=/usr/bin/asus-power-manager
+Icon=com.rezkycodes.BatteryManager
+Terminal=false
+Type=Application
+Categories=System;Settings;HardwareSettings;
+Keywords=battery;power;baterai;hemat;performa;charge;asus;
+StartupNotify=true
+X-GNOME-UsesNotifications=true

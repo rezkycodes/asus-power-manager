@@ -1,0 +1,11 @@
+[Unit]
+Description=Set Battery Charge Threshold to 80%
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'for b in /sys/class/power_supply/BAT*; do [ -f "$b/charge_control_end_threshold" ] && echo 80 > "$b/charge_control_end_threshold"; done'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

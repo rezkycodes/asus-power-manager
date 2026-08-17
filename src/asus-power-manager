@@ -1,0 +1,349 @@
+#!/usr/bin/env /usr/bin/python3
+import sys
+import subprocess
+import os
+import glob
+import gi
+
+gi.require_version('Gtk', '4.0')
+gi.require_version('Adw', '1')
+from gi.repository import Gtk, Adw, GLib, Gio
+
+# Script directory resolver
+SCRIPT_DIR = "/usr/libexec/asus-power-manager/scripts"
+if not os.path.isdir(SCRIPT_DIR):
+    local_dev = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts")
+    if os.path.isdir(local_dev):
+        SCRIPT_DIR = local_dev
+    else:
+        SCRIPT_DIR = os.path.expanduser("~/bin")
+
+def get_script_path(name):
+    return os.path.join(SCRIPT_DIR, name)
+
+class BatteryManagerApp(Adw.Application):
+    def __init__(self):
+        super().__init__(application_id='com.rezkycodes.BatteryManager',
+                         flags=Gio.ApplicationFlags.FLAGS_NONE)
+
+    def do_activate(self):
+        win = self.props.active_window
+        if not win:
+            win = BatteryManagerWindow(application=self)
+        win.present()
+
+class BatteryManagerWindow(Adw.ApplicationWindow):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.set_title("Power & Battery Manager")
+        self.set_default_size(500, 680)
+
+        # Internal guard to prevent signal feedback loops
+        self._updating = False
+
+        # Toolbar View
+        self.toolbar_view = Adw.ToolbarView()
+        self.set_content(self.toolbar_view)
+
+        # Header Bar
+        header = Adw.HeaderBar()
+        self.toolbar_view.add_top_bar(header)
+
+        # Refresh button
+        refresh_btn = Gtk.Button(icon_name="view-refresh-symbolic")
+        refresh_btn.set_tooltip_text("Segarkan Status")
+        refresh_btn.connect("clicked", lambda b: self.update_status())
+        header.pack_end(refresh_btn)
+
+        # Toast overlay
+        self.toast_overlay = Adw.ToastOverlay()
+        self.toolbar_view.set_content(self.toast_overlay)
+
+        # Preferences Page (Built-in smooth scrolling)
+        self.page = Adw.PreferencesPage()
+        self.toast_overlay.set_child(self.page)
+
+        # ── Group 1: Status Baterai & Daya ──────────────────────
+        group_battery = Adw.PreferencesGroup()
+        group_battery.set_title("Status Baterai & Daya")
+        self.page.add(group_battery)
+
+        # Battery Percent & Status Row
+        self.row_bat = Adw.ActionRow()
+        self.row_bat.set_title("Baterai: Memuat...")
+        self.row_bat.set_subtitle("Status: Memuat...")
+        self.row_bat.set_icon_name("battery-symbolic")
+        
+        # Level bar on the right
+        self.level_bar = Gtk.LevelBar()
+        self.level_bar.set_min_value(0.0)
+        self.level_bar.set_max_value(100.0)
+        self.level_bar.set_value(80.0)
+        self.level_bar.set_size_request(100, 16)
+        self.level_bar.set_valign(Gtk.Align.CENTER)
+        self.row_bat.add_suffix(self.level_bar)
+        group_battery.add(self.row_bat)
+
+        # Power Drain / Source Row
+        self.row_drain = Adw.ActionRow()
+        self.row_drain.set_title("Sumber Daya & Watt")
+        self.row_drain.set_subtitle("Memuat...")
+        self.row_drain.set_icon_name("power-profile-balanced-symbolic")
+        group_battery.add(self.row_drain)
+
+        # Battery Health & Capacity Row
+        self.row_health = Adw.ActionRow()
+        self.row_health.set_title("Kesehatan Baterai (Maksimum Pabrik)")
+        self.row_health.set_subtitle("Memuat kapasitas...")
+        self.row_health.set_icon_name("emblem-favorite-symbolic")
+        group_battery.add(self.row_health)
+
+        # ── Group 2: Pilihan Mode Performa ───────────────────────
+        group_modes = Adw.PreferencesGroup()
+        group_modes.set_title("Kontrol Mode Performa & Daya")
+        group_modes.set_description("Pilih profil performa sesuai kebutuhan kerja Anda")
+        self.page.add(group_modes)
+
+        # Mode Powersave Row
+        row_ps = Adw.ActionRow()
+        row_ps.set_title("Mode Hemat Daya (Powersave)")
+        row_ps.set_subtitle("CPU dibatasi 1.7–2.5 GHz, Turbo OFF, Profil Quiet")
+        row_ps.set_icon_name("power-profile-power-saver-symbolic")
+        btn_ps = Gtk.Button(label="Aktifkan")
+        btn_ps.add_css_class("suggested-action")
+        btn_ps.add_css_class("pill")
+        btn_ps.set_valign(Gtk.Align.CENTER)
+        btn_ps.connect("clicked", lambda b: self.set_mode("powersave"))
+        row_ps.add_suffix(btn_ps)
+        group_modes.add(row_ps)
+
+        # Mode Performance Row
+        row_perf = Adw.ActionRow()
+        row_perf.set_title("Mode Performa Penuh (Performance)")
+        row_perf.set_subtitle("CPU Maksimal 4.3 GHz, Turbo ON, Profil Performance")
+        row_perf.set_icon_name("power-profile-performance-symbolic")
+        btn_perf = Gtk.Button(label="Aktifkan")
+        btn_perf.add_css_class("destructive-action")
+        btn_perf.add_css_class("pill")
+        btn_perf.set_valign(Gtk.Align.CENTER)
+        btn_perf.connect("clicked", lambda b: self.set_mode("performance"))
+        row_perf.add_suffix(btn_perf)
+        group_modes.add(row_perf)
+
+        # Mode Auto Row
+        row_auto = Adw.ActionRow()
+        row_auto.set_title("Mode Otomatis (Auto-Switch)")
+        row_auto.set_subtitle("Performa saat colok charger, Hemat saat baterai")
+        row_auto.set_icon_name("system-run-symbolic")
+        btn_auto = Gtk.Button(label="Terapkan")
+        btn_auto.add_css_class("pill")
+        btn_auto.set_valign(Gtk.Align.CENTER)
+        btn_auto.connect("clicked", lambda b: self.set_mode("auto"))
+        row_auto.add_suffix(btn_auto)
+        group_modes.add(row_auto)
+
+        # ── Group 3: Pengaturan Hardware & Server ────────────────
+        group_hw = Adw.PreferencesGroup()
+        group_hw.set_title("Fitur Hardware & Server")
+        self.page.add(group_hw)
+
+        # SwitchRow for 80% Threshold
+        self.switch_threshold = Adw.SwitchRow()
+        self.switch_threshold.set_title("Batas Cas Baterai 80% (Battery Health Care)")
+        self.switch_threshold.set_subtitle("Membatasi pengisian di 80% untuk melindungi sel baterai")
+        self.switch_threshold.set_icon_name("battery-charging-symbolic")
+        self.switch_threshold.connect("notify::active", self.on_threshold_toggled)
+        group_hw.add(self.switch_threshold)
+
+        # Clamshell Status Row
+        row_clamshell = Adw.ActionRow()
+        row_clamshell.set_title("Mode Tutup Layar (Clamshell Server)")
+        row_clamshell.set_subtitle("Layar mati saat ditutup, CPU & agent tetap jalan 100%")
+        row_clamshell.set_icon_name("laptop-symbolic")
+        lbl_cs = Gtk.Label(label="Aktif")
+        lbl_cs.add_css_class("success")
+        lbl_cs.add_css_class("heading")
+        lbl_cs.set_valign(Gtk.Align.CENTER)
+        row_clamshell.add_suffix(lbl_cs)
+        group_hw.add(row_clamshell)
+
+        # CPU Live Info
+        self.row_cpu = Adw.ActionRow()
+        self.row_cpu.set_title("CPU Monitor Real-time")
+        self.row_cpu.set_subtitle("Memuat frekuensi...")
+        self.row_cpu.set_icon_name("cpu-symbolic")
+        group_hw.add(self.row_cpu)
+
+        # GPU Live Info
+        self.row_gpu = Adw.ActionRow()
+        self.row_gpu.set_title("Status NVIDIA GTX 1660 Ti")
+        self.row_gpu.set_subtitle("Memuat status...")
+        self.row_gpu.set_icon_name("video-display-symbolic")
+        group_hw.add(self.row_gpu)
+
+        # Initial Update & 3s Loop
+        self.update_status()
+        GLib.timeout_add_seconds(3, self.auto_refresh_tick)
+
+    def auto_refresh_tick(self):
+        self.update_status()
+        return True
+
+    def show_toast(self, text):
+        toast = Adw.Toast.new(text)
+        toast.set_timeout(3)
+        self.toast_overlay.add_toast(toast)
+
+    def update_status(self):
+        self._updating = True
+        try:
+            # 1. Read sysfs power supply
+            ac_online = False
+            for p in glob.glob("/sys/class/power_supply/*/online"):
+                type_file = os.path.join(os.path.dirname(p), "type")
+                if os.path.exists(type_file):
+                    with open(type_file) as f:
+                        if "Mains" in f.read():
+                            with open(p) as f_on:
+                                ac_online = (f_on.read().strip() == "1")
+                            break
+
+            bat_cap = "80"
+            bat_status = "Not charging"
+            thresh_val = "80"
+            
+            for p in glob.glob("/sys/class/power_supply/BAT*/capacity"):
+                with open(p) as f:
+                    bat_cap = f.read().strip()
+                break
+            for p in glob.glob("/sys/class/power_supply/BAT*/status"):
+                with open(p) as f:
+                    bat_status = f.read().strip()
+                break
+            for p in glob.glob("/sys/class/power_supply/BAT*/charge_control_end_threshold"):
+                with open(p) as f:
+                    thresh_val = f.read().strip()
+                break
+
+            # 2. Read UPower for health capacity & drain rate
+            energy_rate = ""
+            health_cap = ""
+            time_str = ""
+            try:
+                bat_path = subprocess.check_output("upower -e | grep BAT | head -1", shell=True, text=True).strip()
+                if bat_path:
+                    uinfo = subprocess.check_output(f"upower -i '{bat_path}'", shell=True, text=True)
+                    for line in uinfo.splitlines():
+                        line = line.strip()
+                        if line.startswith("energy-rate:"):
+                            energy_rate = line.split(":")[1].strip()
+                        elif line.startswith("capacity:"):
+                            health_cap = line.split(":")[1].strip()
+                        elif "time to" in line:
+                            time_str = line.split(":")[1].strip()
+            except Exception:
+                pass
+
+            pct_num = float(bat_cap) if bat_cap.isdigit() else 80.0
+            self.level_bar.set_value(pct_num)
+
+            # Format Titles based on AC and threshold
+            self.row_bat.set_title(f"Baterai: {bat_cap}%")
+            
+            if ac_online:
+                if thresh_val == "80" and pct_num >= 79.0:
+                    self.row_bat.set_subtitle("🔌 Tersambung Charger — Siaga Penuh (Batas 80% Terpasang)")
+                    self.row_drain.set_subtitle("Daya disuplai langsung dari Adaptor (Baterai Standby)")
+                elif bat_status.lower() == "charging":
+                    target_txt = f" (Target {thresh_val}%)" if thresh_val != "100" else ""
+                    self.row_bat.set_subtitle(f"⚡ Mengisi Daya{target_txt}")
+                    self.row_drain.set_subtitle(f"{energy_rate if energy_rate else 'Aktif'} (Pengisian)")
+                else:
+                    self.row_bat.set_subtitle(f"🔌 Tersambung Charger ({bat_status})")
+                    self.row_drain.set_subtitle("Adaptor Aktif")
+            else:
+                self.row_bat.set_subtitle("🔋 Mode Baterai (Tidak Dicas)")
+                self.row_drain.set_subtitle(f"{energy_rate if energy_rate else 'Aktif'} (Konsumsi Beban)")
+
+            health_txt = health_cap if health_cap else "Normal"
+            est_txt = f" | Estimasi Sisa: {time_str}" if time_str and not ac_online else ""
+            self.row_health.set_subtitle(f"Kesehatan Sel: {health_txt}{est_txt}")
+
+            # 3. Update Switch state without triggering feedback
+            is_80_active = (thresh_val == "80")
+            if self.switch_threshold.get_active() != is_80_active:
+                self.switch_threshold.set_active(is_80_active)
+
+            # 4. CPU Info
+            gov = ""
+            freq_khz = ""
+            boost = ""
+            if os.path.exists("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"):
+                with open("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor") as f:
+                    gov = f.read().strip()
+            if os.path.exists("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq"):
+                with open("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq") as f:
+                    freq_khz = f.read().strip()
+            if os.path.exists("/sys/devices/system/cpu/cpufreq/boost"):
+                with open("/sys/devices/system/cpu/cpufreq/boost") as f:
+                    boost = "Aktif" if f.read().strip() == "1" else "Nonaktif"
+            
+            freq_mhz = int(freq_khz) // 1000 if freq_khz.isdigit() else 0
+            
+            profile = ""
+            if os.path.exists("/sys/firmware/acpi/platform_profile"):
+                with open("/sys/firmware/acpi/platform_profile") as f:
+                    profile = f.read().strip().capitalize()
+
+            self.row_cpu.set_subtitle(f"Governor: {gov.upper()} @ {freq_mhz} MHz | Turbo: {boost} | Profil: {profile}")
+
+            # 5. GPU Info
+            gpu_status = "N/A"
+            gpu_file = "/sys/bus/pci/devices/0000:01:00.0/power/runtime_status"
+            if os.path.exists(gpu_file):
+                with open(gpu_file) as f:
+                    gpu_status = f.read().strip().capitalize()
+            self.row_gpu.set_subtitle(f"Status Runtime: {gpu_status} (Hemat Daya)")
+
+        except Exception as e:
+            pass
+        finally:
+            self._updating = False
+
+    def on_threshold_toggled(self, switch_row, gparam):
+        if self._updating:
+            return
+        val = "80" if switch_row.get_active() else "100"
+        try:
+            subprocess.run(["sudo", "-n", get_script_path("battery-set-threshold.sh"), val], check=True)
+            self.show_toast(f"Batas cas baterai diatur ke {val}%")
+            self.update_status()
+        except Exception as e:
+            self.show_toast(f"Gagal mengatur threshold: {e}")
+
+    def set_mode(self, mode):
+        cmd = []
+        msg = ""
+        if mode == "powersave":
+            cmd = ["sudo", "-n", get_script_path("battery-save.sh")]
+            msg = "⚡ Mode Hemat Daya Berhasil Diaktifkan!"
+        elif mode == "performance":
+            cmd = ["sudo", "-n", get_script_path("battery-on-ac.sh")]
+            msg = "⚡ Mode Performa Penuh Berhasil Diaktifkan!"
+        elif mode == "auto":
+            cmd = ["sudo", "-n", get_script_path("battery-udev-handler.sh")]
+            msg = "⚡ Mode Otomatis Berhasil Diterapkan!"
+
+        try:
+            subprocess.run(cmd, check=True)
+            self.show_toast(msg)
+            self.update_status()
+        except Exception as e:
+            self.show_toast(f"Gagal mengubah mode: {e}")
+
+def main():
+    app = BatteryManagerApp()
+    return app.run(sys.argv)
+
+if __name__ == '__main__':
+    sys.exit(main())

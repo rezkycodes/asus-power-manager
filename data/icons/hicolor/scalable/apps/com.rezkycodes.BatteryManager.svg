@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3584e4"/>
+      <stop offset="100%" stop-color="#1c71d8"/>
+    </linearGradient>
+    <linearGradient id="boltGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f6d32d"/>
+      <stop offset="100%" stop-color="#ff7800"/>
+    </linearGradient>
+    <filter id="dropShadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="4" stdDeviation="4" flood-opacity="0.25"/>
+    </filter>
+  </defs>
+  <!-- Background Rounded Rect -->
+  <rect x="8" y="8" width="112" height="112" rx="28" fill="url(#bgGrad)" filter="url(#dropShadow)"/>
+  <!-- Battery Body Outline -->
+  <rect x="30" y="38" width="60" height="64" rx="10" fill="none" stroke="#ffffff" stroke-width="6" stroke-linecap="round"/>
+  <!-- Battery Terminal / Tip -->
+  <rect x="48" y="26" width="24" height="8" rx="3" fill="#ffffff"/>
+  <!-- Battery Charge Fill (80% level) -->
+  <rect x="36" y="52" width="48" height="44" rx="6" fill="#57e389" opacity="0.9"/>
+  <!-- Lightning Bolt Symbol -->
+  <path d="M66 42 L50 68 L62 68 L56 90 L76 64 L64 64 Z" fill="url(#boltGrad)" stroke="#ffffff" stroke-width="2" stroke-linejoin="round"/>
+</svg>
