@@ -7,7 +7,7 @@ import gi
 
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
-from gi.repository import Gtk, Adw, GLib, Gio
+from gi.repository import Gtk, Adw, GLib, Gio, Gdk
 
 # Script directory resolver
 SCRIPT_DIR = "/usr/libexec/asus-power-manager/scripts"
@@ -21,12 +21,50 @@ if not os.path.isdir(SCRIPT_DIR):
 def get_script_path(name):
     return os.path.join(SCRIPT_DIR, name)
 
+def apply_custom_css():
+    css = """
+    /* Force all icons across the GUI to pure white */
+    image, 
+    image.dim-label, 
+    image.symbolic,
+    .image, 
+    .icon,
+    AdwActionRow image, 
+    AdwActionRow .icon, 
+    actionrow image, 
+    adwactionrow image, 
+    row image,
+    button image,
+    headerbar button image,
+    levelbar block {
+        color: #ffffff !important;
+        -gtk-icon-palette: success #ffffff, warning #ffffff, error #ffffff;
+    }
+
+    /* Keep action row prefix icons bright pure white */
+    .action-row-icon,
+    AdwActionRow > image:first-child,
+    AdwSwitchRow > image:first-child {
+        color: #ffffff !important;
+    }
+    """
+    css_provider = Gtk.CssProvider()
+    css_provider.load_from_data(css.encode('utf-8'))
+    display = Gdk.Display.get_default()
+    if display:
+        Gtk.StyleContext.add_provider_for_display(
+            display,
+            css_provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+
 class BatteryManagerApp(Adw.Application):
     def __init__(self):
         super().__init__(application_id='com.rezkycodes.BatteryManager',
                          flags=Gio.ApplicationFlags.FLAGS_NONE)
 
     def do_activate(self):
+        apply_custom_css()
         win = self.props.active_window
         if not win:
             win = BatteryManagerWindow(application=self)
@@ -72,7 +110,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.row_bat = Adw.ActionRow()
         self.row_bat.set_title("Baterai: Memuat...")
         self.row_bat.set_subtitle("Status: Memuat...")
-        self.row_bat.set_icon_name("battery-symbolic")
+        self.row_bat.set_icon_name("battery-level-80-charging-symbolic")
         
         # Level bar on the right
         self.level_bar = Gtk.LevelBar()
@@ -284,8 +322,8 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             if os.path.exists("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq"):
                 with open("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq") as f:
                     freq_khz = f.read().strip()
-            if os.path.exists("/sys/devices/system/cpu/cpufreq/boost"):
-                with open("/sys/devices/system/cpu/cpufreq/boost") as f:
+            if os.path.exists("/sys/devices/system/cpu/cpu0/cpufreq/boost"):
+                with open("/sys/devices/system/cpu/cpu0/cpufreq/boost") as f:
                     boost = "Aktif" if f.read().strip() == "1" else "Nonaktif"
             
             freq_mhz = int(freq_khz) // 1000 if freq_khz.isdigit() else 0
