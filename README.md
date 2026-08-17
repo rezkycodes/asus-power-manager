@@ -2,9 +2,21 @@
 
 > **A modern GTK4 / Libadwaita power management and battery health control utility for ASUS & Linux laptops (Ubuntu, Debian, Fedora, Arch, etc.).**
 
-![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20GNOME-informational.svg)
-![Packages](https://img.shields.io/badge/packages-.deb%20%7C%20.rpm-success.svg)
+[![GitHub Release](https://img.shields.io/github/v/release/rezkycodes/asus-power-manager?style=for-the-badge&logo=github&color=blue)](https://github.com/rezkycodes/asus-power-manager/releases/latest)
+[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20GNOME-informational?style=for-the-badge&logo=linux)](https://github.com/rezkycodes/asus-power-manager)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
+
+---
+
+## ⬇️ Direct Downloads (v1.0.0)
+
+| Package Format | Target Distribution | Direct Download Link | Quick Terminal Install |
+| :--- | :--- | :---: | :--- |
+| **📦 Debian / Ubuntu (`.deb`)** | Ubuntu, Debian, Pop!_OS, Linux Mint | [**Download .deb**](https://github.com/rezkycodes/asus-power-manager/releases/download/v1.0.0/asus-power-manager_1.0.0_all.deb) | `sudo dpkg -i asus-power-manager_1.0.0_all.deb` |
+| **📦 Fedora / RHEL (`.rpm`)** | Fedora, RHEL, openSUSE, AlmaLinux | [**Download .rpm**](https://github.com/rezkycodes/asus-power-manager/releases/download/v1.0.0/asus-power-manager-1.0.0-1.fc44.noarch.rpm) | `sudo dnf install ./asus-power-manager-*.rpm` |
+| **🗜️ Source Archive (`.zip`)** | Generic Linux, Arch, Source Build | [**Download .zip**](https://github.com/rezkycodes/asus-power-manager/releases/download/v1.0.0/asus-power-manager-1.0.0-source.zip) | `unzip asus-power-manager-*.zip && sudo ./install.sh` |
+
+👉 **[View Full Release Assets on GitHub](https://github.com/rezkycodes/asus-power-manager/releases/tag/v1.0.0)**
 
 ---
 
@@ -25,51 +37,63 @@
 
 ---
 
-## 📦 Installation
+## 📦 Installation Guide
 
-### 1. Ubuntu / Debian / Linux Mint / Pop!_OS (`.deb`)
-Download the latest `.deb` from the Release page or `dist/`:
+### 1. Ubuntu / Debian / Linux Mint / Pop!_OS
 ```bash
+# 1. Download .deb package
+wget https://github.com/rezkycodes/asus-power-manager/releases/download/v1.0.0/asus-power-manager_1.0.0_all.deb
+
+# 2. Install
 sudo dpkg -i asus-power-manager_1.0.0_all.deb
-sudo apt-get install -f  # if dependencies needed
+sudo apt-get install -f
 ```
 
-### 2. Fedora / RHEL / openSUSE (`.rpm`)
-Download the latest `.rpm` from the Release page or `dist/`:
+### 2. Fedora / RHEL / openSUSE
 ```bash
-sudo dnf install ./asus-power-manager-1.0.0-1.fc*.noarch.rpm
+# 1. Download & install .rpm package
+sudo dnf install https://github.com/rezkycodes/asus-power-manager/releases/download/v1.0.0/asus-power-manager-1.0.0-1.fc44.noarch.rpm
 ```
 
-### 3. Install from Source (Any Linux Distro)
+### 3. Install from Source (.zip or git)
 ```bash
-git clone https://github.com/rezkycodes/asus-power-manager.git
-cd asus-power-manager
+# Download and extract source
+wget https://github.com/rezkycodes/asus-power-manager/releases/download/v1.0.0/asus-power-manager-1.0.0-source.zip
+unzip asus-power-manager-1.0.0-source.zip
+cd asus-power-manager-1.0.0
+
+# Install
 sudo ./install.sh
 ```
 
 ---
 
-## 🛠️ Building Packages (.deb and .rpm)
+## 🛠️ Building Packages Locally
 
-You can build both packages with a single command:
+You can build both `.deb` and `.rpm` packages with a single script:
 ```bash
 ./build-packages.sh
 ```
-The generated packages will be placed in the `dist/` folder:
+The generated packages will be placed in the `dist/` directory:
 - `dist/asus-power-manager_1.0.0_all.deb`
 - `dist/asus-power-manager-1.0.0-1.fc44.noarch.rpm`
+- `dist/asus-power-manager-1.0.0-source.zip`
 
 ---
 
 ## 🖥️ Usage
 
-- **Launch from App Menu:** Press `Super` and search for **Power & Battery Manager**.
-- **Launch from Terminal:**
+- **From Application Menu:** Press `Super` and search for **Power & Battery Manager**.
+- **From Terminal:**
   ```bash
   asus-power-manager
+  ```
+- **CLI Battery Status:**
+  ```bash
+  battery-status.sh
   ```
 
 ---
 
 ## 📄 License
-MIT License. Created by [Rezky P. Budihartono](https://github.com/rezkycodes).
+MIT License © 2026 [Rezky P. Budihartono](https://github.com/rezkycodes).
