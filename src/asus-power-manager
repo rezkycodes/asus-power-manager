@@ -87,7 +87,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.set_title("Power & Battery Manager")
-        self.set_default_size(540, 760)
+        self.set_default_size(520, 740)
 
         # Internal state & guards
         self._updating = False
@@ -106,19 +106,14 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         header = Adw.HeaderBar()
         self.toolbar_view.add_top_bar(header)
 
-        # View Stack & Switcher Title
+        # View Stack
         self.stack = Adw.ViewStack()
         
-        switcher_title = Adw.ViewSwitcherTitle()
-        switcher_title.set_stack(self.stack)
-        switcher_title.set_title("Power & Battery Manager")
-        header.set_title_widget(switcher_title)
-
-        # Bottom Switcher Bar for responsive mobile/small views
-        switcher_bar = Adw.ViewSwitcherBar()
-        switcher_bar.set_stack(self.stack)
-        self.toolbar_view.add_bottom_bar(switcher_bar)
-        switcher_title.bind_property("title-visible", switcher_bar, "reveal", Gio.BindingFlags.SYNC_CREATE)
+        # View Switcher in HeaderBar (Always visible tabs)
+        switcher = Adw.ViewSwitcher()
+        switcher.set_stack(self.stack)
+        switcher.set_policy(Adw.ViewSwitcherPolicy.WIDE)
+        header.set_title_widget(switcher)
 
         # Refresh button in header
         refresh_btn = Gtk.Button(icon_name="view-refresh-symbolic")
@@ -135,8 +130,8 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         # TAB 1: DAYA & BATERAI
         # ══════════════════════════════════════════════════════════
         self.page_power = Adw.PreferencesPage()
-        page_power_stack = self.stack.add_titled(self.page_power, "power", "Daya & Baterai")
-        page_power_stack.set_icon_name("battery-level-80-charging-symbolic")
+        stack_power = self.stack.add_titled(self.page_power, "power", "Daya & Baterai")
+        stack_power.set_icon_name("battery-level-80-charging-symbolic")
 
         # ── Group 1: Status Baterai ──────────────────────────────
         group_battery = Adw.PreferencesGroup()
@@ -171,7 +166,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
 
         # ── Group 2: Mode Performa ───────────────────────────────
         group_modes = Adw.PreferencesGroup()
-        group_modes.set_title("Pilih Mode Daya & Performa")
+        group_modes.set_title("Kontrol Mode Performa & Daya")
         group_modes.set_description("Pilih profil performa sesuai kebutuhan kerja Anda")
         self.page_power.add(group_modes)
 
@@ -288,8 +283,8 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         # TAB 2: KEYBOARD RGB (AURA LIGHTING)
         # ══════════════════════════════════════════════════════════
         self.page_rgb = Adw.PreferencesPage()
-        page_rgb_stack = self.stack.add_titled(self.page_rgb, "rgb", "Keyboard RGB")
-        page_rgb_stack.set_icon_name("input-keyboard-symbolic")
+        stack_rgb = self.stack.add_titled(self.page_rgb, "rgb", "Keyboard RGB")
+        stack_rgb.set_icon_name("input-keyboard-symbolic")
 
         # ── Group 1: Kecerahan Backlight ─────────────────────────
         group_rgb_bright = Adw.PreferencesGroup()
@@ -370,7 +365,6 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             btn_c.add_css_class("color-btn")
             btn_c.set_tooltip_text(c_name)
             
-            # CSS for color button
             css_prov = Gtk.CssProvider()
             css_prov.load_from_data(f"button {{ background-color: {hex_c}; }}".encode('utf-8'))
             btn_c.get_style_context().add_provider(css_prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
@@ -402,6 +396,9 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             box_speed_btns.append(btn)
         self.row_rgb_speed.add_suffix(box_speed_btns)
         group_rgb_speed.add(self.row_rgb_speed)
+
+        # Explicitly make "power" tab visible on startup
+        self.stack.set_visible_child_name("power")
 
         # Initial Update & 3s Loop
         self.update_status()
