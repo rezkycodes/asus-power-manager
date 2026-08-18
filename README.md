@@ -1,6 +1,6 @@
-# ASUS Power & Battery Manager
+# Tweaks ASUS TUF
 
-> **A modern GTK4 / Libadwaita power management and battery health control utility for ASUS & Linux laptops (Ubuntu, Debian, Fedora, Arch, etc.).**
+> **A modern GTK4 / Libadwaita hardware tweak utility, power manager, and RGB studio for ASUS TUF & Linux laptops.**
 
 [![GitHub Release](https://img.shields.io/github/v/release/rezkycodes/asus-power-manager?style=for-the-badge&logo=github&color=blue)](https://github.com/rezkycodes/asus-power-manager/releases/latest)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20GNOME-informational?style=for-the-badge&logo=linux)](https://github.com/rezkycodes/asus-power-manager)
