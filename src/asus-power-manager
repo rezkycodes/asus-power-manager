@@ -41,7 +41,6 @@ def apply_custom_css():
         -gtk-icon-palette: success #ffffff, warning #ffffff, error #ffffff;
     }
 
-    /* Keep action row prefix icons bright pure white */
     .action-row-icon,
     AdwActionRow > image:first-child,
     AdwSwitchRow > image:first-child {
@@ -74,7 +73,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.set_title("Power & Battery Manager")
-        self.set_default_size(500, 680)
+        self.set_default_size(500, 720)
 
         # Internal guard to prevent signal feedback loops
         self._updating = False
@@ -180,7 +179,49 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         row_auto.add_suffix(btn_auto)
         group_modes.add(row_auto)
 
-        # ── Group 3: Pengaturan Hardware & Server ────────────────
+        # ── Group 3: Kontrol Kipas & Pendingin ────────────────────
+        group_fan = Adw.PreferencesGroup()
+        group_fan.set_title("Kontrol Kipas & Pendingin (Dual Fan)")
+        group_fan.set_description("Atur kecepatan kipas pendingin hardware ASUS")
+        self.page.add(group_fan)
+
+        # Fan Live RPM Row
+        self.row_fan_rpm = Adw.ActionRow()
+        self.row_fan_rpm.set_title("Kecepatan Putaran Kipas")
+        self.row_fan_rpm.set_subtitle("CPU Fan: -- RPM | GPU Fan: -- RPM")
+        self.row_fan_rpm.set_icon_name("weather-windy-symbolic")
+        group_fan.add(self.row_fan_rpm)
+
+        # Fan Profile Selector Row
+        self.row_fan_ctrl = Adw.ActionRow()
+        self.row_fan_ctrl.set_title("Profil Kecepatan Kipas")
+        self.row_fan_ctrl.set_subtitle("Mode: Normal (Otomatis)")
+        self.row_fan_ctrl.set_icon_name("preferences-system-symbolic")
+
+        box_fan_btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        box_fan_btns.set_valign(Gtk.Align.CENTER)
+
+        btn_fan_silent = Gtk.Button(label="Hening")
+        btn_fan_silent.add_css_class("pill")
+        btn_fan_silent.connect("clicked", lambda b: self.set_fan("2"))
+
+        btn_fan_normal = Gtk.Button(label="Normal")
+        btn_fan_normal.add_css_class("pill")
+        btn_fan_normal.add_css_class("suggested-action")
+        btn_fan_normal.connect("clicked", lambda b: self.set_fan("0"))
+
+        btn_fan_turbo = Gtk.Button(label="Turbo")
+        btn_fan_turbo.add_css_class("pill")
+        btn_fan_turbo.add_css_class("destructive-action")
+        btn_fan_turbo.connect("clicked", lambda b: self.set_fan("1"))
+
+        box_fan_btns.append(btn_fan_silent)
+        box_fan_btns.append(btn_fan_normal)
+        box_fan_btns.append(btn_fan_turbo)
+        self.row_fan_ctrl.add_suffix(box_fan_btns)
+        group_fan.add(self.row_fan_ctrl)
+
+        # ── Group 4: Pengaturan Hardware & Server ────────────────
         group_hw = Adw.PreferencesGroup()
         group_hw.set_title("Fitur Hardware & Server")
         self.page.add(group_hw)
@@ -312,7 +353,32 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             if self.switch_threshold.get_active() != is_80_active:
                 self.switch_threshold.set_active(is_80_active)
 
-            # 4. CPU Info
+            # 4. Fan Monitor & Status
+            fan1_rpm = "--"
+            fan2_rpm = "--"
+            for f1 in glob.glob("/sys/devices/platform/asus-nb-wmi/hwmon/hwmon*/fan1_input"):
+                with open(f1) as f:
+                    fan1_rpm = f.read().strip()
+                break
+            for f2 in glob.glob("/sys/devices/platform/asus-nb-wmi/hwmon/hwmon*/fan2_input"):
+                with open(f2) as f:
+                    fan2_rpm = f.read().strip()
+                break
+            self.row_fan_rpm.set_subtitle(f"CPU Fan: {fan1_rpm} RPM  |  GPU Fan: {fan2_rpm} RPM")
+
+            fan_policy = "0"
+            if os.path.exists("/sys/devices/platform/asus-nb-wmi/throttle_thermal_policy"):
+                with open("/sys/devices/platform/asus-nb-wmi/throttle_thermal_policy") as f:
+                    fan_policy = f.read().strip()
+            
+            fan_mode_label = "Normal / Balanced (Otomatis)"
+            if fan_policy == "1":
+                fan_mode_label = "Turbo / Overboost (Pendinginan Cepat)"
+            elif fan_policy == "2":
+                fan_mode_label = "Silent / Hening (Kecepatan Rendah)"
+            self.row_fan_ctrl.set_subtitle(f"Status Aktif: {fan_mode_label}")
+
+            # 5. CPU Info
             gov = ""
             freq_khz = ""
             boost = ""
@@ -322,8 +388,8 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             if os.path.exists("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq"):
                 with open("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq") as f:
                     freq_khz = f.read().strip()
-            if os.path.exists("/sys/devices/system/cpu/cpu0/cpufreq/boost"):
-                with open("/sys/devices/system/cpu/cpu0/cpufreq/boost") as f:
+            if os.path.exists("/sys/devices/system/cpu/cpufreq/boost"):
+                with open("/sys/devices/system/cpu/cpufreq/boost") as f:
                     boost = "Aktif" if f.read().strip() == "1" else "Nonaktif"
             
             freq_mhz = int(freq_khz) // 1000 if freq_khz.isdigit() else 0
@@ -335,7 +401,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
 
             self.row_cpu.set_subtitle(f"Governor: {gov.upper()} @ {freq_mhz} MHz | Turbo: {boost} | Profil: {profile}")
 
-            # 5. GPU Info
+            # 6. GPU Info
             gpu_status = "N/A"
             gpu_file = "/sys/bus/pci/devices/0000:01:00.0/power/runtime_status"
             if os.path.exists(gpu_file):
@@ -358,6 +424,15 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             self.update_status()
         except Exception as e:
             self.show_toast(f"Gagal mengatur threshold: {e}")
+
+    def set_fan(self, policy):
+        mode_names = {"0": "Normal / Balanced", "1": "Turbo / Overboost", "2": "Silent / Hening"}
+        try:
+            subprocess.run(["sudo", "-n", get_script_path("battery-set-fan.sh"), policy], check=True)
+            self.show_toast(f"Mode Kipas Diatur ke: {mode_names.get(policy, policy)}")
+            self.update_status()
+        except Exception as e:
+            self.show_toast(f"Gagal mengubah mode kipas: {e}")
 
     def set_mode(self, mode):
         cmd = []
