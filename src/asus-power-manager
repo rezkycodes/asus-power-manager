@@ -72,6 +72,32 @@ def apply_custom_css():
     scale.red-slider highlight { background: #ff3b30; }
     scale.green-slider highlight { background: #34c759; }
     scale.blue-slider highlight { background: #007aff; }
+
+    /* Service Status Badges */
+    .badge-running {
+        background-color: #2ec27e;
+        color: #ffffff;
+        border-radius: 9999px;
+        padding: 2px 10px;
+        font-weight: bold;
+        font-size: 11px;
+    }
+    .badge-stopped {
+        background-color: #5e5c64;
+        color: #ffffff;
+        border-radius: 9999px;
+        padding: 2px 10px;
+        font-weight: bold;
+        font-size: 11px;
+    }
+    .badge-failed {
+        background-color: #e01b24;
+        color: #ffffff;
+        border-radius: 9999px;
+        padding: 2px 10px;
+        font-weight: bold;
+        font-size: 11px;
+    }
     """
     css_provider = Gtk.CssProvider()
     css_provider.load_from_data(css.encode('utf-8'))
@@ -99,7 +125,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.set_title("Power & Battery Manager")
-        self.set_default_size(540, 780)
+        self.set_default_size(560, 800)
 
         # Internal state & guards
         self._updating = False
@@ -309,10 +335,9 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
 
         self.row_rgb_preview = Adw.ActionRow()
         self.row_rgb_preview.set_title("Warna Keyboard Saat Ini")
-        self.row_rgb_preview.set_subtitle("RGB: (0, 200, 255) | Mode: Static")
+        self.row_rgb_preview.set_subtitle("RGB: (0, 200, 255) | Hex: #00C8FF | Mode: Static")
         self.row_rgb_preview.set_icon_name("applications-graphics-symbolic")
 
-        # Cairo Canvas for live color swatch box
         self.preview_area = Gtk.DrawingArea()
         self.preview_area.set_content_width(52)
         self.preview_area.set_content_height(28)
@@ -464,7 +489,6 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             row_eff.add_suffix(btn_eff)
             group_rgb_effects.add(row_eff)
 
-        # Highlight initial mode
         self.update_effect_button_styles()
 
         # ── Group 5: Kecerahan & Kecepatan ───────────────────────
@@ -511,6 +535,115 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             box_speed_btns.append(btn)
         self.row_rgb_speed.add_suffix(box_speed_btns)
         group_rgb_settings.add(self.row_rgb_speed)
+
+        # ══════════════════════════════════════════════════════════
+        # TAB 3: LAYANAN SYSTEMD (BACKGROUND SERVICES)
+        # ══════════════════════════════════════════════════════════
+        self.page_services = Adw.PreferencesPage()
+        stack_services = self.stack.add_titled(self.page_services, "services", "Layanan Sistem")
+        stack_services.set_icon_name("system-run-symbolic")
+
+        # ── Group 1: User & AI Agent Services ────────────────────
+        group_user_srv = Adw.PreferencesGroup()
+        group_user_srv.set_title("Layanan AI & Pengguna (User Daemons)")
+        group_user_srv.set_description("Kelola dan pantau service background pengguna yang aktif 24/7")
+        self.page_services.add(group_user_srv)
+
+        # List of user services
+        self.user_services = [
+            ("9router.service", "9router AI Proxy Gateway", "Port: 20128 (Local AI Gateway)", "network-server-symbolic"),
+            ("agentmemory.service", "AgentMemory Daemon Server", "Port: 3111 (AI Memory Bridge)", "drive-harddisk-symbolic"),
+            ("hermes-gateway.service", "Hermes Agent Gateway", "Bot Telegram & Messaging Integration", "user-available-symbolic"),
+            ("hermes-webui.service", "Hermes Web UI Interface", "Port: 8787 (Browser Dashboard)", "applications-internet-symbolic"),
+            ("code-server.service", "VS Code Remote Server", "Port: 8080 (Web IDE Browser)", "utilities-terminal-symbolic"),
+            ("ts-forward-watch.service", "Tailscale Port Forwarder", "Auto Forward Localhost Ports", "network-wireless-symbolic")
+        ]
+
+        self.service_widgets = {}
+
+        for s_unit, s_title, s_sub, s_icon in self.user_services:
+            row_s = Adw.ActionRow()
+            row_s.set_title(s_title)
+            row_s.set_subtitle(f"Unit: {s_unit} • {s_sub}")
+            row_s.set_icon_name(s_icon)
+
+            box_actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            box_actions.set_valign(Gtk.Align.CENTER)
+
+            lbl_badge = Gtk.Label(label="Memuat...")
+            lbl_badge.add_css_class("badge-stopped")
+
+            btn_toggle = Gtk.Button(label="Mulai")
+            btn_toggle.add_css_class("pill")
+            btn_toggle.connect("clicked", lambda w, u=s_unit, is_user=True: self.toggle_service_state(u, is_user))
+
+            btn_restart = Gtk.Button(icon_name="view-refresh-symbolic")
+            btn_restart.set_tooltip_text(f"Restart {s_unit}")
+            btn_restart.add_css_class("pill")
+            btn_restart.connect("clicked", lambda w, u=s_unit, is_user=True: self.restart_service(u, is_user))
+
+            box_actions.append(lbl_badge)
+            box_actions.append(btn_toggle)
+            box_actions.append(btn_restart)
+            row_s.add_suffix(box_actions)
+
+            self.service_widgets[f"user:{s_unit}"] = {
+                "badge": lbl_badge,
+                "toggle": btn_toggle,
+                "row": row_s,
+                "is_user": True,
+                "unit": s_unit
+            }
+            group_user_srv.add(row_s)
+
+        # ── Group 2: System Infrastructure Services ──────────────
+        group_sys_srv = Adw.PreferencesGroup()
+        group_sys_srv.set_title("Layanan Infrastruktur Sistem (Root Daemons)")
+        group_sys_srv.set_description("Service inti sistem Linux dan networking")
+        self.page_services.add(group_sys_srv)
+
+        self.sys_services = [
+            ("ollama.service", "Ollama Local LLM Engine", "Port: 11434 (Hardware Local Model Runner)", "cpu-symbolic"),
+            ("tailscaled.service", "Tailscale Mesh VPN Daemon", "Jaringan VPN Remote Tanpa Port-Forwarding", "network-vpn-symbolic"),
+            ("sshd.service", "OpenSSH Server Daemon", "Port: 22 (Akses Terminal Jarak Jauh)", "preferences-system-network-symbolic"),
+            ("docker.service", "Docker Container Engine", "Runtime Kontainer & Layanan Virtual", "package-x-generic-symbolic"),
+            ("battery-charge-threshold.service", "Batas Baterai 80% Service", "Proteksi Hardware Pengisian Otomatis", "battery-charging-symbolic")
+        ]
+
+        for s_unit, s_title, s_sub, s_icon in self.sys_services:
+            row_s = Adw.ActionRow()
+            row_s.set_title(s_title)
+            row_s.set_subtitle(f"Unit: {s_unit} • {s_sub}")
+            row_s.set_icon_name(s_icon)
+
+            box_actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            box_actions.set_valign(Gtk.Align.CENTER)
+
+            lbl_badge = Gtk.Label(label="Memuat...")
+            lbl_badge.add_css_class("badge-stopped")
+
+            btn_toggle = Gtk.Button(label="Mulai")
+            btn_toggle.add_css_class("pill")
+            btn_toggle.connect("clicked", lambda w, u=s_unit, is_user=False: self.toggle_service_state(u, is_user))
+
+            btn_restart = Gtk.Button(icon_name="view-refresh-symbolic")
+            btn_restart.set_tooltip_text(f"Restart {s_unit}")
+            btn_restart.add_css_class("pill")
+            btn_restart.connect("clicked", lambda w, u=s_unit, is_user=False: self.restart_service(u, is_user))
+
+            box_actions.append(lbl_badge)
+            box_actions.append(btn_toggle)
+            box_actions.append(btn_restart)
+            row_s.add_suffix(box_actions)
+
+            self.service_widgets[f"sys:{s_unit}"] = {
+                "badge": lbl_badge,
+                "toggle": btn_toggle,
+                "row": row_s,
+                "is_user": False,
+                "unit": s_unit
+            }
+            group_sys_srv.add(row_s)
 
         # Explicitly make "power" tab visible on startup
         self.stack.set_visible_child_name("power")
@@ -693,7 +826,6 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
                 fan_mode_label = "Silent / Hening (Kecepatan Rendah)"
             self.row_fan_ctrl.set_subtitle(f"Status Aktif: {fan_mode_label}")
 
-            # Update fan button styling
             self.btn_fan_silent.remove_css_class("suggested-action")
             self.btn_fan_normal.remove_css_class("suggested-action")
             self.btn_fan_turbo.remove_css_class("suggested-action")
@@ -732,10 +864,79 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
                     gpu_status = f.read().strip().capitalize()
             self.row_gpu.set_subtitle(f"Status Runtime: {gpu_status} (Hemat Daya)")
 
+            # 7. Update Systemd Services Tab
+            self.update_services_status()
+
         except Exception:
             pass
         finally:
             self._updating = False
+
+    def update_services_status(self):
+        for key, s_data in self.service_widgets.items():
+            unit = s_data["unit"]
+            is_user = s_data["is_user"]
+            badge = s_data["badge"]
+            btn_toggle = s_data["toggle"]
+
+            cmd = ["systemctl", "--user", "is-active", unit] if is_user else ["systemctl", "is-active", unit]
+            try:
+                res = subprocess.run(cmd, capture_output=True, text=True)
+                st = res.stdout.strip()
+                
+                badge.remove_css_class("badge-running")
+                badge.remove_css_class("badge-stopped")
+                badge.remove_css_class("badge-failed")
+                btn_toggle.remove_css_class("destructive-action")
+                btn_toggle.remove_css_class("suggested-action")
+
+                if st == "active":
+                    badge.set_text("Aktif")
+                    badge.add_css_class("badge-running")
+                    btn_toggle.set_label("Stop")
+                    btn_toggle.add_css_class("destructive-action")
+                elif st == "failed":
+                    badge.set_text("Gagal")
+                    badge.add_css_class("badge-failed")
+                    btn_toggle.set_label("Start")
+                    btn_toggle.add_css_class("suggested-action")
+                else:
+                    badge.set_text("Mati")
+                    badge.add_css_class("badge-stopped")
+                    btn_toggle.set_label("Start")
+                    btn_toggle.add_css_class("suggested-action")
+            except Exception:
+                badge.set_text("Unknown")
+
+    def toggle_service_state(self, unit, is_user):
+        cmd_chk = ["systemctl", "--user", "is-active", unit] if is_user else ["systemctl", "is-active", unit]
+        curr = subprocess.run(cmd_chk, capture_output=True, text=True).stdout.strip()
+        action = "stop" if curr == "active" else "start"
+        
+        if is_user:
+            cmd = ["systemctl", "--user", action, unit]
+        else:
+            cmd = ["sudo", "-n", "systemctl", action, unit]
+
+        try:
+            subprocess.run(cmd, check=True)
+            self.show_toast(f"Layanan {unit} berhasil di-{action}!")
+            self.update_status()
+        except Exception as e:
+            self.show_toast(f"Gagal {action} {unit}: {e}")
+
+    def restart_service(self, unit, is_user):
+        if is_user:
+            cmd = ["systemctl", "--user", "restart", unit]
+        else:
+            cmd = ["sudo", "-n", "systemctl", "restart", unit]
+
+        try:
+            subprocess.run(cmd, check=True)
+            self.show_toast(f"Layanan {unit} berhasil di-restart!")
+            self.update_status()
+        except Exception as e:
+            self.show_toast(f"Gagal me-restart {unit}: {e}")
 
     def on_threshold_toggled(self, switch_row, gparam):
         if self._updating:
@@ -843,7 +1044,6 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.row_slider_g.set_subtitle(f"Nilai: {g}")
         self.row_slider_b.set_subtitle(f"Nilai: {b}")
 
-        # Update color dialog button
         rgba = Gdk.RGBA()
         rgba.red = r / 255.0
         rgba.green = g / 255.0
@@ -857,7 +1057,6 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
     def trigger_debounced_rgb_apply(self):
         if self._debounce_timer_id is not None:
             GLib.source_remove(self._debounce_timer_id)
-        # Apply hardware write after 60ms debounce
         self._debounce_timer_id = GLib.timeout_add(60, self._perform_rgb_hardware_write)
 
     def _perform_rgb_hardware_write(self):
