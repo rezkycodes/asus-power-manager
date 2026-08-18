@@ -106,7 +106,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self._rgb_slider_updating = False
         self._debounce_timer_id = None
         
-        self.rgb_mode = "0"        # 0=Static, 1=Breathing, 2=Cycle, 3=Strobe
+        self.rgb_mode = "0"        # 0=Static, 1=Breathing, 2=Cycle, 3=Strobe, 10=Pulse
         self.rgb_r = 0
         self.rgb_g = 200
         self.rgb_b = 255
@@ -309,7 +309,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
 
         self.row_rgb_preview = Adw.ActionRow()
         self.row_rgb_preview.set_title("Warna Keyboard Saat Ini")
-        self.row_rgb_preview.set_subtitle("RGB: (0, 200, 255) | Hex: #00C8FF | Mode: Static")
+        self.row_rgb_preview.set_subtitle("RGB: (0, 200, 255) | Mode: Static")
         self.row_rgb_preview.set_icon_name("applications-graphics-symbolic")
 
         # Cairo Canvas for live color swatch box
@@ -321,13 +321,12 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.row_rgb_preview.add_suffix(self.preview_area)
         group_rgb_hero.add(self.row_rgb_preview)
 
-        # ── Group 2: Palet Warna Cepat (PROPORTIONAL & SPACIOUS) ─
+        # ── Group 2: Palet Warna Cepat ───────────────────────────
         group_rgb_palette = Adw.PreferencesGroup()
         group_rgb_palette.set_title("Palet Warna Cepat (Preset)")
         group_rgb_palette.set_description("Pilih salah satu dari 9 warna preset untuk diterapkan seketika")
         self.page_rgb.add(group_rgb_palette)
 
-        # Create a dedicated full-width card for swatches
         palette_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         palette_card.add_css_class("swatches-card")
 
@@ -364,7 +363,6 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
 
         palette_card.append(box_swatches)
         
-        # Add to group inside an ActionRow container with no squeezed text
         row_palette_container = Adw.PreferencesRow()
         row_palette_container.set_child(palette_card)
         group_rgb_palette.add(row_palette_container)
@@ -446,9 +444,10 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
 
         effects = [
             ("0", "Static (Warna Tetap)", "Lampu menyala konstan dengan satu warna pilihan"),
-            ("1", "Breathing (Pernapasan)", "Lampu memudar dan menyala perlahan seperti bernapas"),
+            ("1", "Breathing (Pernapasan)", "Lampu memudar dan menyala perlahan"),
+            ("10", "Pulse (Denyut Jantung)", "Lampu berdenyut ritmis dengan warna pilihan"),
             ("2", "Color Cycle (Rainbow Spektrum)", "Siklus spektrum transisi warna-warni secara mulus"),
-            ("3", "Strobing (Berkedip)", "Lampu berkedip cepat dengan ritme teratur")
+            ("3", "Strobing (Berkedip Cepat)", "Lampu berkedip strobo dengan ritme cepat")
         ]
 
         self.effect_buttons = {}
@@ -570,7 +569,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         if hasattr(self, 'preview_area'):
             self.preview_area.queue_draw()
         
-        mode_names = {"0": "Static", "1": "Breathing", "2": "Color Cycle", "3": "Strobing"}
+        mode_names = {"0": "Static", "1": "Breathing", "2": "Color Cycle", "3": "Strobing", "10": "Pulse"}
         self.row_rgb_preview.set_subtitle(f"RGB: ({self.rgb_r}, {self.rgb_g}, {self.rgb_b}) | Hex: {hex_color.upper()} | Mode: {mode_names.get(self.rgb_mode, 'Static')}")
 
     def update_effect_button_styles(self):
@@ -868,7 +867,13 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
 
     def select_rgb_mode(self, mode):
         self.rgb_mode = mode
-        mode_names = {"0": "Static", "1": "Breathing", "2": "Color Cycle", "3": "Strobing"}
+        mode_names = {
+            "0": "Static",
+            "1": "Breathing",
+            "10": "Pulse",
+            "2": "Color Cycle",
+            "3": "Strobing"
+        }
         self.update_effect_button_styles()
         self.update_preview_box_color()
         self.apply_rgb_hardware()
