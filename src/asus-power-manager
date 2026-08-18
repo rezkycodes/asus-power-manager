@@ -3,6 +3,7 @@ import sys
 import subprocess
 import os
 import glob
+import math
 import gi
 
 gi.require_version('Gtk', '4.0')
@@ -49,47 +50,21 @@ def apply_custom_css():
         color: #ffffff !important;
     }
 
-    /* Vibrant Color Swatch Buttons */
-    .color-swatch-btn {
+    /* Swatch Button Styling */
+    .color-swatch-wrapper {
+        padding: 2px;
+        border-radius: 9999px;
         min-width: 36px;
         min-height: 36px;
-        border-radius: 9999px;
-        padding: 0;
-        margin: 2px;
-        border: 2px solid rgba(255, 255, 255, 0.4);
-        box-shadow: 0 2px 5px rgba(0, 0, 0, 0.35);
-        transition: transform 120ms ease-in-out, border 120ms ease-in-out;
     }
-    .color-swatch-btn:hover {
-        transform: scale(1.12);
-        border: 2px solid #ffffff;
-    }
-    .color-swatch-btn:active {
-        transform: scale(0.95);
+    .color-swatch-wrapper:hover {
+        background-color: rgba(255, 255, 255, 0.15);
     }
 
-    /* Distinct Swatch Colors */
-    .swatch-cyan    { background: #00c8ff !important; background-color: #00c8ff !important; background-image: none !important; }
-    .swatch-blue    { background: #0064ff !important; background-color: #0064ff !important; background-image: none !important; }
-    .swatch-purple  { background: #a000ff !important; background-color: #a000ff !important; background-image: none !important; }
-    .swatch-magenta { background: #ff007f !important; background-color: #ff007f !important; background-image: none !important; }
-    .swatch-red     { background: #ff0000 !important; background-color: #ff0000 !important; background-image: none !important; }
-    .swatch-orange  { background: #ff7800 !important; background-color: #ff7800 !important; background-image: none !important; }
-    .swatch-yellow  { background: #ffd800 !important; background-color: #ffd800 !important; background-image: none !important; }
-    .swatch-green   { background: #00e676 !important; background-color: #00e676 !important; background-image: none !important; }
-    .swatch-white   { background: #ffffff !important; background-color: #ffffff !important; background-image: none !important; }
-
-    /* Live Color Preview Pill */
-    .live-preview-box {
-        border-radius: 12px;
-        border: 2px solid rgba(255, 255, 255, 0.3);
-        box-shadow: 0 3px 10px rgba(0,0,0,0.4);
-    }
-
-    /* Slider accent colors */
-    scale.red-slider highlight { background-color: #ff3b30; }
-    scale.green-slider highlight { background-color: #34c759; }
-    scale.blue-slider highlight { background-color: #007aff; }
+    /* RGB Sliders Color Styling */
+    scale.red-slider highlight { background: #ff3b30; }
+    scale.green-slider highlight { background: #34c759; }
+    scale.blue-slider highlight { background: #007aff; }
     """
     css_provider = Gtk.CssProvider()
     css_provider.load_from_data(css.encode('utf-8'))
@@ -117,11 +92,13 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.set_title("Power & Battery Manager")
-        self.set_default_size(540, 780)
+        self.set_default_size(520, 760)
 
         # Internal state & guards
         self._updating = False
         self._rgb_slider_updating = False
+        self._debounce_timer_id = None
+        
         self.rgb_mode = "0"        # 0=Static, 1=Breathing, 2=Cycle, 3=Strobe
         self.rgb_r = 0
         self.rgb_g = 200
@@ -129,10 +106,10 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.rgb_speed = "1"       # 0=Slow, 1=Med, 2=Fast
         self.rgb_brightness = 3    # 0-3
 
-        # Load saved RGB config if exists
+        # Load saved RGB config
         self.load_saved_rgb_config()
 
-        # Main Toolbar View
+        # Toolbar View
         self.toolbar_view = Adw.ToolbarView()
         self.set_content(self.toolbar_view)
 
@@ -143,7 +120,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         # View Stack
         self.stack = Adw.ViewStack()
         
-        # View Switcher in HeaderBar (Always visible tabs)
+        # Center View Switcher
         switcher = Adw.ViewSwitcher()
         switcher.set_stack(self.stack)
         switcher.set_policy(Adw.ViewSwitcherPolicy.WIDE)
@@ -258,23 +235,21 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         box_fan_btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         box_fan_btns.set_valign(Gtk.Align.CENTER)
 
-        btn_fan_silent = Gtk.Button(label="Hening")
-        btn_fan_silent.add_css_class("pill")
-        btn_fan_silent.connect("clicked", lambda b: self.set_fan("2"))
+        self.btn_fan_silent = Gtk.Button(label="Hening")
+        self.btn_fan_silent.add_css_class("pill")
+        self.btn_fan_silent.connect("clicked", lambda b: self.set_fan("2"))
 
-        btn_fan_normal = Gtk.Button(label="Normal")
-        btn_fan_normal.add_css_class("pill")
-        btn_fan_normal.add_css_class("suggested-action")
-        btn_fan_normal.connect("clicked", lambda b: self.set_fan("0"))
+        self.btn_fan_normal = Gtk.Button(label="Normal")
+        self.btn_fan_normal.add_css_class("pill")
+        self.btn_fan_normal.connect("clicked", lambda b: self.set_fan("0"))
 
-        btn_fan_turbo = Gtk.Button(label="Turbo")
-        btn_fan_turbo.add_css_class("pill")
-        btn_fan_turbo.add_css_class("destructive-action")
-        btn_fan_turbo.connect("clicked", lambda b: self.set_fan("1"))
+        self.btn_fan_turbo = Gtk.Button(label="Turbo")
+        self.btn_fan_turbo.add_css_class("pill")
+        self.btn_fan_turbo.connect("clicked", lambda b: self.set_fan("1"))
 
-        box_fan_btns.append(btn_fan_silent)
-        box_fan_btns.append(btn_fan_normal)
-        box_fan_btns.append(btn_fan_turbo)
+        box_fan_btns.append(self.btn_fan_silent)
+        box_fan_btns.append(self.btn_fan_normal)
+        box_fan_btns.append(self.btn_fan_turbo)
         self.row_fan_ctrl.add_suffix(box_fan_btns)
         group_fan.add(self.row_fan_ctrl)
 
@@ -330,13 +305,13 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.row_rgb_preview.set_subtitle("RGB: (0, 200, 255) | Mode: Static")
         self.row_rgb_preview.set_icon_name("applications-graphics-symbolic")
 
-        # Live visual color swatch box
-        self.preview_box = Gtk.Box()
-        self.preview_box.set_size_request(48, 28)
-        self.preview_box.set_valign(Gtk.Align.CENTER)
-        self.preview_box.add_css_class("live-preview-box")
-        self.update_preview_box_color()
-        self.row_rgb_preview.add_suffix(self.preview_box)
+        # Cairo Canvas for live color swatch box
+        self.preview_area = Gtk.DrawingArea()
+        self.preview_area.set_content_width(52)
+        self.preview_area.set_content_height(28)
+        self.preview_area.set_valign(Gtk.Align.CENTER)
+        self.preview_area.set_draw_func(self.draw_preview_box)
+        self.row_rgb_preview.add_suffix(self.preview_area)
         group_rgb_hero.add(self.row_rgb_preview)
 
         # ── Group 2: Palet Warna Cepat ───────────────────────────
@@ -354,22 +329,30 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         box_swatches.set_valign(Gtk.Align.CENTER)
 
         palette_list = [
-            ("Cyan", 0, 200, 255, "swatch-cyan"),
-            ("Biru", 0, 100, 255, "swatch-blue"),
-            ("Ungu", 160, 0, 255, "swatch-purple"),
-            ("Magenta", 255, 0, 127, "swatch-magenta"),
-            ("Merah", 255, 0, 0, "swatch-red"),
-            ("Oranye", 255, 120, 0, "swatch-orange"),
-            ("Kuning", 255, 216, 0, "swatch-yellow"),
-            ("Hijau", 0, 230, 118, "swatch-green"),
-            ("Putih", 255, 255, 255, "swatch-white")
+            ("Cyan", 0, 200, 255),
+            ("Biru", 0, 100, 255),
+            ("Ungu", 160, 0, 255),
+            ("Magenta", 255, 0, 127),
+            ("Merah", 255, 0, 0),
+            ("Oranye", 255, 120, 0),
+            ("Kuning", 255, 216, 0),
+            ("Hijau", 0, 230, 118),
+            ("Putih", 255, 255, 255)
         ]
 
-        for c_name, r, g, b, css_cls in palette_list:
+        for c_name, r, g, b in palette_list:
             btn = Gtk.Button()
-            btn.add_css_class("color-swatch-btn")
-            btn.add_css_class(css_cls)
+            btn.add_css_class("flat")
+            btn.add_css_class("color-swatch-wrapper")
             btn.set_tooltip_text(f"Pilih Warna {c_name}")
+            
+            # Cairo circle inside button
+            circle_area = Gtk.DrawingArea()
+            circle_area.set_content_width(32)
+            circle_area.set_content_height(32)
+            circle_area.set_draw_func(self.draw_palette_circle, (r, g, b))
+            btn.set_child(circle_area)
+            
             btn.connect("clicked", lambda w, cr=r, cg=g, cb=b, cn=c_name: self.apply_preset_color(cr, cg, cb, cn))
             box_swatches.append(btn)
 
@@ -474,8 +457,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             group_rgb_effects.add(row_eff)
 
         # Highlight initial mode
-        if self.rgb_mode in self.effect_buttons:
-            self.effect_buttons[self.rgb_mode].add_css_class("suggested-action")
+        self.update_effect_button_styles()
 
         # ── Group 5: Kecerahan & Kecepatan ───────────────────────
         group_rgb_settings = Adw.PreferencesGroup()
@@ -529,30 +511,66 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.update_status()
         GLib.timeout_add_seconds(3, self.auto_refresh_tick)
 
+    # ── Cairo Drawing Functions ────────────────────────────────
+    def draw_palette_circle(self, area, cr, width, height, user_data):
+        r, g, b = user_data
+        radius = min(width, height) / 2.0 - 2.0
+        cr.arc(width / 2.0, height / 2.0, radius, 0, 2 * math.pi)
+        cr.set_source_rgb(r / 255.0, g / 255.0, b / 255.0)
+        cr.fill_preserve()
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.45)
+        cr.set_line_width(2.0)
+        cr.stroke()
+
+    def draw_preview_box(self, area, cr, width, height):
+        # Draw rounded rectangle preview
+        radius = 6.0
+        x, y, w, h = 2.0, 2.0, width - 4.0, height - 4.0
+        
+        cr.new_sub_path()
+        cr.arc(x + w - radius, y + radius, radius, -math.pi / 2, 0)
+        cr.arc(x + w - radius, y + h - radius, radius, 0, math.pi / 2)
+        cr.arc(x + radius, y + h - radius, radius, math.pi / 2, math.pi)
+        cr.arc(x + radius, y + radius, radius, math.pi, 3 * math.pi / 2)
+        cr.close_path()
+
+        cr.set_source_rgb(self.rgb_r / 255.0, self.rgb_g / 255.0, self.rgb_b / 255.0)
+        cr.fill_preserve()
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.6)
+        cr.set_line_width(2.0)
+        cr.stroke()
+
     def load_saved_rgb_config(self):
         conf_file = "/etc/asus-power-manager/rgb.conf"
         if os.path.exists(conf_file):
             try:
                 with open(conf_file) as f:
                     for line in f:
-                        k, v = line.strip().split("=", 1)
-                        if k == "MODE": self.rgb_mode = v
-                        elif k == "RED": self.rgb_r = int(v)
-                        elif k == "GREEN": self.rgb_g = int(v)
-                        elif k == "BLUE": self.rgb_b = int(v)
-                        elif k == "SPEED": self.rgb_speed = v
-                        elif k == "BRIGHTNESS": self.rgb_brightness = int(v)
+                        if "=" in line:
+                            k, v = line.strip().split("=", 1)
+                            if k == "MODE": self.rgb_mode = v
+                            elif k == "RED": self.rgb_r = int(v)
+                            elif k == "GREEN": self.rgb_g = int(v)
+                            elif k == "BLUE": self.rgb_b = int(v)
+                            elif k == "SPEED": self.rgb_speed = v
+                            elif k == "BRIGHTNESS": self.rgb_brightness = int(v)
             except Exception:
                 pass
 
     def update_preview_box_color(self):
         hex_color = f"#{self.rgb_r:02x}{self.rgb_g:02x}{self.rgb_b:02x}"
-        css_prov = Gtk.CssProvider()
-        css_prov.load_from_data(f".live-preview-box {{ background-color: {hex_color} !important; }}".encode('utf-8'))
-        self.preview_box.get_style_context().add_provider(css_prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        if hasattr(self, 'preview_area'):
+            self.preview_area.queue_draw()
         
         mode_names = {"0": "Static", "1": "Breathing", "2": "Color Cycle", "3": "Strobing"}
         self.row_rgb_preview.set_subtitle(f"RGB: ({self.rgb_r}, {self.rgb_g}, {self.rgb_b}) | Hex: {hex_color.upper()} | Mode: {mode_names.get(self.rgb_mode, 'Static')}")
+
+    def update_effect_button_styles(self):
+        for m_id, btn in self.effect_buttons.items():
+            if m_id == self.rgb_mode:
+                btn.add_css_class("suggested-action")
+            else:
+                btn.remove_css_class("suggested-action")
 
     def auto_refresh_tick(self):
         self.update_status()
@@ -616,7 +634,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             pct_num = float(bat_cap) if bat_cap.isdigit() else 80.0
             self.level_bar.set_value(pct_num)
 
-            # Format Titles based on AC and threshold
+            # Titles based on AC and threshold
             self.row_bat.set_title(f"Baterai: {bat_cap}%")
             
             if ac_online:
@@ -667,6 +685,14 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             elif fan_policy == "2":
                 fan_mode_label = "Silent / Hening (Kecepatan Rendah)"
             self.row_fan_ctrl.set_subtitle(f"Status Aktif: {fan_mode_label}")
+
+            # Update fan button styling
+            self.btn_fan_silent.remove_css_class("suggested-action")
+            self.btn_fan_normal.remove_css_class("suggested-action")
+            self.btn_fan_turbo.remove_css_class("suggested-action")
+            if fan_policy == "2": self.btn_fan_silent.add_css_class("suggested-action")
+            elif fan_policy == "1": self.btn_fan_turbo.add_css_class("suggested-action")
+            else: self.btn_fan_normal.add_css_class("suggested-action")
 
             # 5. CPU Info
             gov = ""
@@ -769,7 +795,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.color_btn.set_rgba(rgba)
 
         self.update_preview_box_color()
-        self.apply_rgb_hardware()
+        self.trigger_debounced_rgb_apply()
         self.show_toast(f"Warna RGB Diatur ke: {name}")
 
     def on_color_dialog_changed(self, btn, gparam):
@@ -792,7 +818,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self._rgb_slider_updating = False
 
         self.update_preview_box_color()
-        self.apply_rgb_hardware()
+        self.trigger_debounced_rgb_apply()
 
     def on_rgb_slider_changed(self, scale):
         if self._rgb_slider_updating:
@@ -819,18 +845,23 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.color_btn.set_rgba(rgba)
 
         self.update_preview_box_color()
+        self.trigger_debounced_rgb_apply()
+
+    def trigger_debounced_rgb_apply(self):
+        if self._debounce_timer_id is not None:
+            GLib.source_remove(self._debounce_timer_id)
+        # Apply hardware write after 60ms debounce
+        self._debounce_timer_id = GLib.timeout_add(60, self._perform_rgb_hardware_write)
+
+    def _perform_rgb_hardware_write(self):
+        self._debounce_timer_id = None
         self.apply_rgb_hardware()
+        return False
 
     def select_rgb_mode(self, mode):
         self.rgb_mode = mode
         mode_names = {"0": "Static", "1": "Breathing", "2": "Color Cycle", "3": "Strobing"}
-        
-        for m_id, btn in self.effect_buttons.items():
-            if m_id == mode:
-                btn.add_css_class("suggested-action")
-            else:
-                btn.remove_css_class("suggested-action")
-
+        self.update_effect_button_styles()
         self.update_preview_box_color()
         self.apply_rgb_hardware()
         self.show_toast(f"Efek RGB Diatur ke: {mode_names.get(mode, mode)}")
