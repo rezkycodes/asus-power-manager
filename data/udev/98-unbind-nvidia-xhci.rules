@@ -1,0 +1,2 @@
+# Unbind unused NVIDIA dummy xHCI controller to prevent USB reset crashes on D3 resume
+ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x10de", ATTR{class}=="0x0c0330", RUN+="/bin/sh -c 'echo -n %k > /sys/bus/pci/drivers/xhci_hcd/unbind 2>/dev/null || true'"
