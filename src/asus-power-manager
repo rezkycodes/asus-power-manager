@@ -52,13 +52,20 @@ def apply_custom_css():
 
     /* Swatch Button Styling */
     .color-swatch-wrapper {
-        padding: 2px;
+        padding: 3px;
         border-radius: 9999px;
-        min-width: 36px;
-        min-height: 36px;
+        min-width: 42px;
+        min-height: 42px;
+        margin: 2px;
     }
     .color-swatch-wrapper:hover {
-        background-color: rgba(255, 255, 255, 0.15);
+        background-color: rgba(255, 255, 255, 0.2);
+    }
+
+    .swatches-card {
+        background-color: alpha(currentColor, 0.04);
+        border-radius: 12px;
+        padding: 12px;
     }
 
     /* RGB Sliders Color Styling */
@@ -92,7 +99,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.set_title("Power & Battery Manager")
-        self.set_default_size(520, 760)
+        self.set_default_size(540, 780)
 
         # Internal state & guards
         self._updating = False
@@ -302,7 +309,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
 
         self.row_rgb_preview = Adw.ActionRow()
         self.row_rgb_preview.set_title("Warna Keyboard Saat Ini")
-        self.row_rgb_preview.set_subtitle("RGB: (0, 200, 255) | Mode: Static")
+        self.row_rgb_preview.set_subtitle("RGB: (0, 200, 255) | Hex: #00C8FF | Mode: Static")
         self.row_rgb_preview.set_icon_name("applications-graphics-symbolic")
 
         # Cairo Canvas for live color swatch box
@@ -314,18 +321,18 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.row_rgb_preview.add_suffix(self.preview_area)
         group_rgb_hero.add(self.row_rgb_preview)
 
-        # ── Group 2: Palet Warna Cepat ───────────────────────────
+        # ── Group 2: Palet Warna Cepat (PROPORTIONAL & SPACIOUS) ─
         group_rgb_palette = Adw.PreferencesGroup()
         group_rgb_palette.set_title("Palet Warna Cepat (Preset)")
-        group_rgb_palette.set_description("Klik warna di bawah untuk mengubah warna seketika")
+        group_rgb_palette.set_description("Pilih salah satu dari 9 warna preset untuk diterapkan seketika")
         self.page_rgb.add(group_rgb_palette)
 
-        row_palette = Adw.ActionRow()
-        row_palette.set_title("Warna Pilihan Populer")
-        row_palette.set_subtitle("Pilih salah satu dari 9 warna preset")
-        row_palette.set_icon_name("color-select-symbolic")
+        # Create a dedicated full-width card for swatches
+        palette_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        palette_card.add_css_class("swatches-card")
 
-        box_swatches = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        box_swatches = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        box_swatches.set_halign(Gtk.Align.CENTER)
         box_swatches.set_valign(Gtk.Align.CENTER)
 
         palette_list = [
@@ -344,20 +351,23 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             btn = Gtk.Button()
             btn.add_css_class("flat")
             btn.add_css_class("color-swatch-wrapper")
-            btn.set_tooltip_text(f"Pilih Warna {c_name}")
+            btn.set_tooltip_text(f"Pilih Warna {c_name} (RGB: {r},{g},{b})")
             
-            # Cairo circle inside button
             circle_area = Gtk.DrawingArea()
-            circle_area.set_content_width(32)
-            circle_area.set_content_height(32)
+            circle_area.set_content_width(34)
+            circle_area.set_content_height(34)
             circle_area.set_draw_func(self.draw_palette_circle, (r, g, b))
             btn.set_child(circle_area)
             
             btn.connect("clicked", lambda w, cr=r, cg=g, cb=b, cn=c_name: self.apply_preset_color(cr, cg, cb, cn))
             box_swatches.append(btn)
 
-        row_palette.add_suffix(box_swatches)
-        group_rgb_palette.add(row_palette)
+        palette_card.append(box_swatches)
+        
+        # Add to group inside an ActionRow container with no squeezed text
+        row_palette_container = Adw.PreferencesRow()
+        row_palette_container.set_child(palette_card)
+        group_rgb_palette.add(row_palette_container)
 
         # ── Group 3: Color Wheel & Custom Color Picker ───────────
         group_rgb_custom = Adw.PreferencesGroup()
@@ -365,11 +375,10 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.page_rgb.add(group_rgb_custom)
 
         row_color_dialog = Adw.ActionRow()
-        row_color_dialog.set_title("Color Picker Dialog (Lingkaran Warna)")
-        row_color_dialog.set_subtitle("Buka dialog pemilih warna spektrum bebas")
+        row_color_dialog.set_title("Dialog Lingkaran Spektrum Warna")
+        row_color_dialog.set_subtitle("Buka dialog pemilih warna bebas GNOME")
         row_color_dialog.set_icon_name("emblem-photos-symbolic")
 
-        # Native GNOME ColorDialogButton
         self.color_dialog = Gtk.ColorDialog()
         self.color_dialog.set_with_alpha(False)
         self.color_btn = Gtk.ColorDialogButton(dialog=self.color_dialog)
@@ -397,7 +406,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.row_slider_r.set_subtitle(f"Nilai: {self.rgb_r}")
         self.scale_r = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 255, 1)
         self.scale_r.set_value(self.rgb_r)
-        self.scale_r.set_size_request(160, -1)
+        self.scale_r.set_size_request(180, -1)
         self.scale_r.set_valign(Gtk.Align.CENTER)
         self.scale_r.add_css_class("red-slider")
         self.scale_r.connect("value-changed", self.on_rgb_slider_changed)
@@ -410,7 +419,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.row_slider_g.set_subtitle(f"Nilai: {self.rgb_g}")
         self.scale_g = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 255, 1)
         self.scale_g.set_value(self.rgb_g)
-        self.scale_g.set_size_request(160, -1)
+        self.scale_g.set_size_request(180, -1)
         self.scale_g.set_valign(Gtk.Align.CENTER)
         self.scale_g.add_css_class("green-slider")
         self.scale_g.connect("value-changed", self.on_rgb_slider_changed)
@@ -423,7 +432,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.row_slider_b.set_subtitle(f"Nilai: {self.rgb_b}")
         self.scale_b = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 255, 1)
         self.scale_b.set_value(self.rgb_b)
-        self.scale_b.set_size_request(160, -1)
+        self.scale_b.set_size_request(180, -1)
         self.scale_b.set_valign(Gtk.Align.CENTER)
         self.scale_b.add_css_class("blue-slider")
         self.scale_b.connect("value-changed", self.on_rgb_slider_changed)
@@ -523,7 +532,6 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         cr.stroke()
 
     def draw_preview_box(self, area, cr, width, height):
-        # Draw rounded rectangle preview
         radius = 6.0
         x, y, w, h = 2.0, 2.0, width - 4.0, height - 4.0
         
@@ -796,7 +804,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
 
         self.update_preview_box_color()
         self.trigger_debounced_rgb_apply()
-        self.show_toast(f"Warna RGB Diatur ke: {name}")
+        self.show_toast(f"Warna RGB: {name} (#{r:02X}{g:02X}{b:02X})")
 
     def on_color_dialog_changed(self, btn, gparam):
         rgba = btn.get_rgba()
