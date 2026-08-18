@@ -63,12 +63,32 @@ def apply_custom_css():
         color: #ffffff !important;
     }
 
-    /* Swatch Button Styling */
+    /* Modern Rounded-Rectangle Buttons (Agak kotak dengan radius halus 8px) */
+    button,
+    button.pill,
+    .pill,
+    .rounded-btn {
+        border-radius: 8px !important;
+        padding: 5px 14px !important;
+        font-weight: 600;
+        transition: all 120ms ease-in-out;
+    }
+    button:hover,
+    .pill:hover {
+        filter: brightness(1.08);
+    }
+    button:active,
+    .pill:active {
+        filter: brightness(0.92);
+        transform: scale(0.98);
+    }
+
+    /* Color Swatch Button Wrapper */
     .color-swatch-wrapper {
         padding: 3px;
-        border-radius: 9999px;
-        min-width: 42px;
-        min-height: 42px;
+        border-radius: 8px !important;
+        min-width: 40px;
+        min-height: 40px;
         margin: 2px;
     }
     .color-swatch-wrapper:hover {
@@ -77,7 +97,7 @@ def apply_custom_css():
 
     .swatches-card {
         background-color: alpha(currentColor, 0.04);
-        border-radius: 12px;
+        border-radius: 10px;
         padding: 12px;
     }
 
@@ -86,28 +106,28 @@ def apply_custom_css():
     scale.green-slider highlight { background: #34c759; }
     scale.blue-slider highlight { background: #007aff; }
 
-    /* Service Status Badges */
+    /* Service Status Badges (Rounded-Rectangle with 6px radius) */
     .badge-running {
         background-color: #2ec27e;
         color: #ffffff;
-        border-radius: 9999px;
-        padding: 3px 12px;
+        border-radius: 6px;
+        padding: 3px 10px;
         font-weight: bold;
         font-size: 11px;
     }
     .badge-stopped {
         background-color: #5e5c64;
         color: #ffffff;
-        border-radius: 9999px;
-        padding: 3px 12px;
+        border-radius: 6px;
+        padding: 3px 10px;
         font-weight: bold;
         font-size: 11px;
     }
     .badge-failed {
         background-color: #e01b24;
         color: #ffffff;
-        border-radius: 9999px;
-        padding: 3px 12px;
+        border-radius: 6px;
+        padding: 3px 10px;
         font-weight: bold;
         font-size: 11px;
     }
@@ -118,7 +138,7 @@ def apply_custom_css():
         font-size: 12px;
         padding: 12px;
         background-color: alpha(currentColor, 0.05);
-        border-radius: 10px;
+        border-radius: 8px;
     }
     """
     css_provider = Gtk.CssProvider()
@@ -149,17 +169,15 @@ class ServiceDetailWindow(Adw.Window):
         header = Adw.HeaderBar()
         toolbar_view.add_top_bar(header)
 
-        # Refresh button in header
         btn_refresh = Gtk.Button(icon_name="lucide-refresh-cw")
         btn_refresh.set_tooltip_text("Segarkan Detail")
         btn_refresh.connect("clicked", lambda b: self.load_data())
         header.pack_end(btn_refresh)
 
-        # Content page
         page = Adw.PreferencesPage()
         toolbar_view.set_content(page)
 
-        # ── Group 1: Informasi & Status Runtime ───────────────────
+        # Group 1: Informasi Runtime
         group_info = Adw.PreferencesGroup()
         group_info.set_title(unit_title)
         group_info.set_description(f"Tipe: {'Layanan Pengguna (--user)' if is_user else 'Layanan Sistem (Root)'} • Unit: {unit_name}")
@@ -182,18 +200,16 @@ class ServiceDetailWindow(Adw.Window):
         self.row_resource.set_icon_name("lucide-cpu")
         group_info.add(self.row_resource)
 
-        # ── Group 2: Script Systemd (.service file) ───────────────
+        # Group 2: Script Systemd (.service file)
         group_script = Adw.PreferencesGroup()
         group_script.set_title("File Konfigurasi Script Systemd")
         group_script.set_description("Definisi unit file resmi yang dieksekusi oleh systemd")
         
         btn_copy = Gtk.Button(label="Salin Script")
-        btn_copy.add_css_class("pill")
         btn_copy.connect("clicked", self.copy_script_to_clipboard)
         group_script.set_header_suffix(btn_copy)
         page.add(group_script)
 
-        # Code TextView inside scrolled box
         self.script_buffer = Gtk.TextBuffer()
         text_view = Gtk.TextView.new_with_buffer(self.script_buffer)
         text_view.set_editable(False)
@@ -211,7 +227,7 @@ class ServiceDetailWindow(Adw.Window):
         row_script.set_child(scrolled_script)
         group_script.add(row_script)
 
-        # ── Group 3: Log Jurnal Terbaru ──────────────────────────
+        # Group 3: Log Jurnal
         group_logs = Adw.PreferencesGroup()
         group_logs.set_title("Log Aktivitas Terbaru (Journald)")
         page.add(group_logs)
@@ -233,7 +249,7 @@ class ServiceDetailWindow(Adw.Window):
         row_logs.set_child(scrolled_logs)
         group_logs.add(row_logs)
 
-        # ── Group 4: Kontrol Aksi Layanan ─────────────────────────
+        # Group 4: Kontrol Aksi Layanan
         group_actions = Adw.PreferencesGroup()
         group_actions.set_title("Kontrol Cepat Layanan")
         page.add(group_actions)
@@ -247,11 +263,9 @@ class ServiceDetailWindow(Adw.Window):
         box_ctrl_btns.set_valign(Gtk.Align.CENTER)
 
         self.btn_toggle = Gtk.Button(label="Start")
-        self.btn_toggle.add_css_class("pill")
         self.btn_toggle.connect("clicked", lambda b: self.toggle_service())
 
         self.btn_restart = Gtk.Button(label="Restart")
-        self.btn_restart.add_css_class("pill")
         self.btn_restart.add_css_class("suggested-action")
         self.btn_restart.connect("clicked", lambda b: self.restart_service())
 
@@ -263,7 +277,6 @@ class ServiceDetailWindow(Adw.Window):
         self.load_data()
 
     def load_data(self):
-        # 1. Status & Resource
         cmd_status = ["systemctl", "--user", "status", self.unit_name, "--no-pager"] if self.is_user else ["systemctl", "status", self.unit_name, "--no-pager"]
         try:
             res_status = subprocess.run(cmd_status, capture_output=True, text=True)
@@ -308,7 +321,6 @@ class ServiceDetailWindow(Adw.Window):
         except Exception as e:
             self.row_status.set_subtitle(f"Error membaca status: {e}")
 
-        # 2. Cat Script (.service file content)
         cmd_cat = ["systemctl", "--user", "cat", self.unit_name] if self.is_user else ["systemctl", "cat", self.unit_name]
         try:
             res_cat = subprocess.run(cmd_cat, capture_output=True, text=True)
@@ -317,7 +329,6 @@ class ServiceDetailWindow(Adw.Window):
         except Exception as e:
             self.script_buffer.set_text(f"Gagal membaca script: {e}")
 
-        # 3. Recent Logs
         cmd_logs = ["journalctl", "--user", "-u", self.unit_name, "-n", "20", "--no-pager"] if self.is_user else ["journalctl", "-u", self.unit_name, "-n", "20", "--no-pager"]
         try:
             res_logs = subprocess.run(cmd_logs, capture_output=True, text=True)
@@ -392,45 +403,37 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.rgb_speed = "1"       # 0=Slow, 1=Med, 2=Fast
         self.rgb_brightness = 3    # 0-3
 
-        # Load saved RGB config
         self.load_saved_rgb_config()
 
-        # Toolbar View
         self.toolbar_view = Adw.ToolbarView()
         self.set_content(self.toolbar_view)
 
-        # Header Bar
         header = Adw.HeaderBar()
         self.toolbar_view.add_top_bar(header)
 
-        # View Stack
         self.stack = Adw.ViewStack()
         
-        # Center View Switcher
         switcher = Adw.ViewSwitcher()
         switcher.set_stack(self.stack)
         switcher.set_policy(Adw.ViewSwitcherPolicy.WIDE)
         header.set_title_widget(switcher)
 
-        # Refresh button in header (Lucide Rotate-CW icon)
         refresh_btn = Gtk.Button(icon_name="lucide-refresh-cw")
         refresh_btn.set_tooltip_text("Segarkan Status")
         refresh_btn.connect("clicked", lambda b: self.update_status())
         header.pack_end(refresh_btn)
 
-        # Toast Overlay
         self.toast_overlay = Adw.ToastOverlay()
         self.toast_overlay.set_child(self.stack)
         self.toolbar_view.set_content(self.toast_overlay)
 
         # ══════════════════════════════════════════════════════════
-        # TAB 1: DAYA & BATERAI (Lucide Icons)
+        # TAB 1: DAYA & BATERAI
         # ══════════════════════════════════════════════════════════
         self.page_power = Adw.PreferencesPage()
         stack_power = self.stack.add_titled(self.page_power, "power", "Daya & Baterai")
         stack_power.set_icon_name("lucide-battery-charging")
 
-        # ── Group 1: Status Baterai ──────────────────────────────
         group_battery = Adw.PreferencesGroup()
         group_battery.set_title("Status Baterai & Daya")
         self.page_power.add(group_battery)
@@ -461,7 +464,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.row_health.set_icon_name("lucide-heart-pulse")
         group_battery.add(self.row_health)
 
-        # ── Group 2: Mode Performa ───────────────────────────────
+        # Group 2: Mode Performa
         group_modes = Adw.PreferencesGroup()
         group_modes.set_title("Kontrol Mode Performa & Daya")
         group_modes.set_description("Pilih profil performa sesuai kebutuhan kerja Anda")
@@ -473,7 +476,6 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         row_ps.set_icon_name("lucide-leaf")
         btn_ps = Gtk.Button(label="Aktifkan")
         btn_ps.add_css_class("suggested-action")
-        btn_ps.add_css_class("pill")
         btn_ps.set_valign(Gtk.Align.CENTER)
         btn_ps.connect("clicked", lambda b: self.set_mode("powersave"))
         row_ps.add_suffix(btn_ps)
@@ -485,7 +487,6 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         row_perf.set_icon_name("lucide-flame")
         btn_perf = Gtk.Button(label="Aktifkan")
         btn_perf.add_css_class("destructive-action")
-        btn_perf.add_css_class("pill")
         btn_perf.set_valign(Gtk.Align.CENTER)
         btn_perf.connect("clicked", lambda b: self.set_mode("performance"))
         row_perf.add_suffix(btn_perf)
@@ -496,13 +497,12 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         row_auto.set_subtitle("Performa saat colok charger, Hemat saat baterai")
         row_auto.set_icon_name("lucide-refresh-cw")
         btn_auto = Gtk.Button(label="Terapkan")
-        btn_auto.add_css_class("pill")
         btn_auto.set_valign(Gtk.Align.CENTER)
         btn_auto.connect("clicked", lambda b: self.set_mode("auto"))
         row_auto.add_suffix(btn_auto)
         group_modes.add(row_auto)
 
-        # ── Group 3: Kontrol Kipas ───────────────────────────────
+        # Group 3: Kontrol Kipas
         group_fan = Adw.PreferencesGroup()
         group_fan.set_title("Kontrol Kipas & Pendingin (Dual Fan)")
         self.page_power.add(group_fan)
@@ -522,15 +522,13 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         box_fan_btns.set_valign(Gtk.Align.CENTER)
 
         self.btn_fan_silent = Gtk.Button(label="Hening")
-        self.btn_fan_silent.add_css_class("pill")
         self.btn_fan_silent.connect("clicked", lambda b: self.set_fan("2"))
 
         self.btn_fan_normal = Gtk.Button(label="Normal")
-        self.btn_fan_normal.add_css_class("pill")
+        self.btn_fan_normal.add_css_class("suggested-action")
         self.btn_fan_normal.connect("clicked", lambda b: self.set_fan("0"))
 
         self.btn_fan_turbo = Gtk.Button(label="Turbo")
-        self.btn_fan_turbo.add_css_class("pill")
         self.btn_fan_turbo.add_css_class("destructive-action")
         self.btn_fan_turbo.connect("clicked", lambda b: self.set_fan("1"))
 
@@ -540,7 +538,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.row_fan_ctrl.add_suffix(box_fan_btns)
         group_fan.add(self.row_fan_ctrl)
 
-        # ── Group 4: Fitur Hardware & Server ─────────────────────
+        # Group 4: Fitur Hardware & Server
         group_hw = Adw.PreferencesGroup()
         group_hw.set_title("Fitur Hardware & Server")
         self.page_power.add(group_hw)
@@ -576,13 +574,13 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         group_hw.add(self.row_gpu)
 
         # ══════════════════════════════════════════════════════════
-        # TAB 2: KEYBOARD RGB (Lucide Icons)
+        # TAB 2: KEYBOARD RGB
         # ══════════════════════════════════════════════════════════
         self.page_rgb = Adw.PreferencesPage()
         stack_rgb = self.stack.add_titled(self.page_rgb, "rgb", "Keyboard RGB")
         stack_rgb.set_icon_name("lucide-keyboard")
 
-        # ── Group 1: Live Color Preview Hero Card ────────────────
+        # Group 1: Live Color Preview
         group_rgb_hero = Adw.PreferencesGroup()
         group_rgb_hero.set_title("Status Warna & Efek Aktif")
         self.page_rgb.add(group_rgb_hero)
@@ -600,7 +598,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.row_rgb_preview.add_suffix(self.preview_area)
         group_rgb_hero.add(self.row_rgb_preview)
 
-        # ── Group 2: Palet Warna Cepat ───────────────────────────
+        # Group 2: Palet Warna Cepat
         group_rgb_palette = Adw.PreferencesGroup()
         group_rgb_palette.set_title("Palet Warna Cepat (Preset)")
         group_rgb_palette.set_description("Pilih salah satu dari 9 warna preset untuk diterapkan seketika")
@@ -646,7 +644,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         row_palette_container.set_child(palette_card)
         group_rgb_palette.add(row_palette_container)
 
-        # ── Group 3: Color Wheel & Custom Color Picker ───────────
+        # Group 3: Color Wheel & Custom Picker
         group_rgb_custom = Adw.PreferencesGroup()
         group_rgb_custom.set_title("Pilih Warna Bebas (Color Wheel)")
         self.page_rgb.add(group_rgb_custom)
@@ -677,7 +675,6 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         group_rgb_sliders.set_title("Penyesuaian Manual (Slider RGB)")
         self.page_rgb.add(group_rgb_sliders)
 
-        # Red Slider
         self.row_slider_r = Adw.ActionRow()
         self.row_slider_r.set_title("Merah (Red)")
         self.row_slider_r.set_subtitle(f"Nilai: {self.rgb_r}")
@@ -690,7 +687,6 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.row_slider_r.add_suffix(self.scale_r)
         group_rgb_sliders.add(self.row_slider_r)
 
-        # Green Slider
         self.row_slider_g = Adw.ActionRow()
         self.row_slider_g.set_title("Hijau (Green)")
         self.row_slider_g.set_subtitle(f"Nilai: {self.rgb_g}")
@@ -703,7 +699,6 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.row_slider_g.add_suffix(self.scale_g)
         group_rgb_sliders.add(self.row_slider_g)
 
-        # Blue Slider
         self.row_slider_b = Adw.ActionRow()
         self.row_slider_b.set_title("Biru (Blue)")
         self.row_slider_b.set_subtitle(f"Nilai: {self.rgb_b}")
@@ -716,7 +711,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.row_slider_b.add_suffix(self.scale_b)
         group_rgb_sliders.add(self.row_slider_b)
 
-        # ── Group 4: Efek Pencahayaan (Aura Effects) ─────────────
+        # Group 4: Efek Aura
         group_rgb_effects = Adw.PreferencesGroup()
         group_rgb_effects.set_title("Pilihan Efek Animasi (Aura Lighting)")
         self.page_rgb.add(group_rgb_effects)
@@ -736,7 +731,6 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             row_eff.set_subtitle(m_sub)
             row_eff.set_icon_name(m_icon)
             btn_eff = Gtk.Button(label="Terapkan")
-            btn_eff.add_css_class("pill")
             btn_eff.set_valign(Gtk.Align.CENTER)
             btn_eff.connect("clicked", lambda w, mode=m_id: self.select_rgb_mode(mode))
             self.effect_buttons[m_id] = btn_eff
@@ -745,12 +739,11 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
 
         self.update_effect_button_styles()
 
-        # ── Group 5: Kecerahan & Kecepatan ───────────────────────
+        # Group 5: Kecerahan & Kecepatan
         group_rgb_settings = Adw.PreferencesGroup()
         group_rgb_settings.set_title("Kecerahan & Kecepatan Efek")
         self.page_rgb.add(group_rgb_settings)
 
-        # Brightness
         self.row_rgb_bright = Adw.ActionRow()
         self.row_rgb_bright.set_title("Kecerahan Lampu Keyboard")
         self.row_rgb_bright.set_subtitle(f"Tingkat {self.rgb_brightness} (Maksimal)" if self.rgb_brightness == 3 else f"Tingkat {self.rgb_brightness}")
@@ -761,7 +754,6 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.bright_buttons = {}
         for b_val, b_lbl in [(0, "Mati"), (1, "Redup"), (2, "Sedang"), (3, "Terang")]:
             btn = Gtk.Button(label=b_lbl)
-            btn.add_css_class("pill")
             if b_val == self.rgb_brightness:
                 btn.add_css_class("suggested-action")
             btn.connect("clicked", lambda w, v=b_val: self.set_rgb_brightness_level(v))
@@ -770,7 +762,6 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.row_rgb_bright.add_suffix(box_bright_btns)
         group_rgb_settings.add(self.row_rgb_bright)
 
-        # Speed
         self.row_rgb_speed = Adw.ActionRow()
         self.row_rgb_speed.set_title("Kecepatan Animasi Efek")
         self.row_rgb_speed.set_subtitle("Sedang" if self.rgb_speed == "1" else ("Lambat" if self.rgb_speed == "0" else "Cepat"))
@@ -781,7 +772,6 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.speed_buttons = {}
         for s_val, s_lbl in [("0", "Lambat"), ("1", "Sedang"), ("2", "Cepat")]:
             btn = Gtk.Button(label=s_lbl)
-            btn.add_css_class("pill")
             if s_val == self.rgb_speed:
                 btn.add_css_class("suggested-action")
             btn.connect("clicked", lambda w, sp=s_val, sl=s_lbl: self.select_rgb_speed(sp, sl))
@@ -791,19 +781,17 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         group_rgb_settings.add(self.row_rgb_speed)
 
         # ══════════════════════════════════════════════════════════
-        # TAB 3: LAYANAN SYSTEMD (Lucide Icons + Clickable Details)
+        # TAB 3: LAYANAN SYSTEMD
         # ══════════════════════════════════════════════════════════
         self.page_services = Adw.PreferencesPage()
         stack_services = self.stack.add_titled(self.page_services, "services", "Layanan Sistem")
         stack_services.set_icon_name("lucide-server")
 
-        # ── Group 1: User & AI Agent Services ────────────────────
         group_user_srv = Adw.PreferencesGroup()
         group_user_srv.set_title("Layanan AI & Pengguna (User Daemons)")
         group_user_srv.set_description("Klik baris untuk melihat script .service lengkap, resource, dan log realtime")
         self.page_services.add(group_user_srv)
 
-        # List of user services with Lucide icons
         self.user_services = [
             ("9router.service", "9router AI Proxy Gateway", "Port: 20128 (Local AI Gateway)", "lucide-network"),
             ("agentmemory.service", "AgentMemory Daemon Server", "Port: 3111 (AI Memory Bridge)", "lucide-database"),
@@ -830,16 +818,13 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             lbl_badge.add_css_class("badge-stopped")
 
             btn_toggle = Gtk.Button(label="Mulai")
-            btn_toggle.add_css_class("pill")
             btn_toggle.connect("clicked", lambda w, u=s_unit, is_user=True: self.toggle_service_state(u, is_user))
 
             btn_restart = Gtk.Button(icon_name="lucide-refresh-cw")
             btn_restart.set_tooltip_text(f"Restart {s_unit}")
-            btn_restart.add_css_class("pill")
             btn_restart.connect("clicked", lambda w, u=s_unit, is_user=True: self.restart_service(u, is_user))
 
             btn_detail = Gtk.Button(label="Detail")
-            btn_detail.add_css_class("pill")
             btn_detail.set_tooltip_text("Buka Script & Log")
             btn_detail.connect("clicked", lambda w, u=s_unit, t=s_title, iu=True: self.open_service_detail(u, t, iu))
 
@@ -858,7 +843,6 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             }
             group_user_srv.add(row_s)
 
-        # ── Group 2: System Infrastructure Services ──────────────
         group_sys_srv = Adw.PreferencesGroup()
         group_sys_srv.set_title("Layanan Infrastruktur Sistem (Root Daemons)")
         group_sys_srv.set_description("Klik baris untuk melihat script .service lengkap, resource, dan log realtime")
@@ -887,16 +871,13 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             lbl_badge.add_css_class("badge-stopped")
 
             btn_toggle = Gtk.Button(label="Mulai")
-            btn_toggle.add_css_class("pill")
             btn_toggle.connect("clicked", lambda w, u=s_unit, is_user=False: self.toggle_service_state(u, is_user))
 
             btn_restart = Gtk.Button(icon_name="lucide-refresh-cw")
             btn_restart.set_tooltip_text(f"Restart {s_unit}")
-            btn_restart.add_css_class("pill")
             btn_restart.connect("clicked", lambda w, u=s_unit, is_user=False: self.restart_service(u, is_user))
 
             btn_detail = Gtk.Button(label="Detail")
-            btn_detail.add_css_class("pill")
             btn_detail.set_tooltip_text("Buka Script & Log")
             btn_detail.connect("clicked", lambda w, u=s_unit, t=s_title, iu=False: self.open_service_detail(u, t, iu))
 
@@ -1258,7 +1239,6 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.rgb_g = g
         self.rgb_b = b
         
-        # Update sliders without feedback loop
         self._rgb_slider_updating = True
         self.scale_r.set_value(r)
         self.scale_g.set_value(g)
@@ -1268,7 +1248,6 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.row_slider_b.set_subtitle(f"Nilai: {b}")
         self._rgb_slider_updating = False
 
-        # Update Color Dialog Button
         rgba = Gdk.RGBA()
         rgba.red = r / 255.0
         rgba.green = g / 255.0
