@@ -9,6 +9,7 @@ gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
 from gi.repository import Gtk, Adw, GLib, Gio, Gdk
 
+# Script directory resolver
 def get_script_path(name):
     candidates = [
         "/usr/libexec/asus-power-manager/scripts",
@@ -48,6 +49,17 @@ def apply_custom_css():
     AdwSwitchRow > image:first-child {
         color: #ffffff !important;
     }
+
+    .color-btn {
+        border-radius: 9999px;
+        min-width: 36px;
+        min-height: 36px;
+        padding: 0;
+        border: 2px solid rgba(255, 255, 255, 0.4);
+    }
+    .color-btn:checked, .color-btn:active {
+        border: 3px solid #ffffff;
+    }
     """
     css_provider = Gtk.CssProvider()
     css_provider.load_from_data(css.encode('utf-8'))
@@ -75,12 +87,18 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.set_title("Power & Battery Manager")
-        self.set_default_size(500, 720)
+        self.set_default_size(540, 760)
 
-        # Internal guard to prevent signal feedback loops
+        # Internal state & guards
         self._updating = False
+        self.rgb_mode = "0"        # 0=Static, 1=Breathing, 2=Cycle, 3=Strobe
+        self.rgb_r = 0
+        self.rgb_g = 200
+        self.rgb_b = 255
+        self.rgb_speed = "1"       # 0=Slow, 1=Med, 2=Fast
+        self.rgb_brightness = 3    # 0-3
 
-        # Toolbar View
+        # Main Toolbar View
         self.toolbar_view = Adw.ToolbarView()
         self.set_content(self.toolbar_view)
 
@@ -88,32 +106,48 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         header = Adw.HeaderBar()
         self.toolbar_view.add_top_bar(header)
 
-        # Refresh button
+        # View Stack & Switcher Title
+        self.stack = Adw.ViewStack()
+        
+        switcher_title = Adw.ViewSwitcherTitle()
+        switcher_title.set_stack(self.stack)
+        switcher_title.set_title("Power & Battery Manager")
+        header.set_title_widget(switcher_title)
+
+        # Bottom Switcher Bar for responsive mobile/small views
+        switcher_bar = Adw.ViewSwitcherBar()
+        switcher_bar.set_stack(self.stack)
+        self.toolbar_view.add_bottom_bar(switcher_bar)
+        switcher_title.bind_property("title-visible", switcher_bar, "reveal", Gio.BindingFlags.SYNC_CREATE)
+
+        # Refresh button in header
         refresh_btn = Gtk.Button(icon_name="view-refresh-symbolic")
         refresh_btn.set_tooltip_text("Segarkan Status")
         refresh_btn.connect("clicked", lambda b: self.update_status())
         header.pack_end(refresh_btn)
 
-        # Toast overlay
+        # Toast Overlay
         self.toast_overlay = Adw.ToastOverlay()
+        self.toast_overlay.set_child(self.stack)
         self.toolbar_view.set_content(self.toast_overlay)
 
-        # Preferences Page (Built-in smooth scrolling)
-        self.page = Adw.PreferencesPage()
-        self.toast_overlay.set_child(self.page)
+        # ══════════════════════════════════════════════════════════
+        # TAB 1: DAYA & BATERAI
+        # ══════════════════════════════════════════════════════════
+        self.page_power = Adw.PreferencesPage()
+        page_power_stack = self.stack.add_titled(self.page_power, "power", "Daya & Baterai")
+        page_power_stack.set_icon_name("battery-level-80-charging-symbolic")
 
-        # ── Group 1: Status Baterai & Daya ──────────────────────
+        # ── Group 1: Status Baterai ──────────────────────────────
         group_battery = Adw.PreferencesGroup()
         group_battery.set_title("Status Baterai & Daya")
-        self.page.add(group_battery)
+        self.page_power.add(group_battery)
 
-        # Battery Percent & Status Row
         self.row_bat = Adw.ActionRow()
         self.row_bat.set_title("Baterai: Memuat...")
         self.row_bat.set_subtitle("Status: Memuat...")
-        self.row_bat.set_icon_name("battery-level-80-charging-symbolic")
+        self.row_bat.set_icon_name("battery-symbolic")
         
-        # Level bar on the right
         self.level_bar = Gtk.LevelBar()
         self.level_bar.set_min_value(0.0)
         self.level_bar.set_max_value(100.0)
@@ -123,27 +157,24 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.row_bat.add_suffix(self.level_bar)
         group_battery.add(self.row_bat)
 
-        # Power Drain / Source Row
         self.row_drain = Adw.ActionRow()
         self.row_drain.set_title("Sumber Daya & Watt")
         self.row_drain.set_subtitle("Memuat...")
         self.row_drain.set_icon_name("power-profile-balanced-symbolic")
         group_battery.add(self.row_drain)
 
-        # Battery Health & Capacity Row
         self.row_health = Adw.ActionRow()
         self.row_health.set_title("Kesehatan Baterai (Maksimum Pabrik)")
         self.row_health.set_subtitle("Memuat kapasitas...")
         self.row_health.set_icon_name("emblem-favorite-symbolic")
         group_battery.add(self.row_health)
 
-        # ── Group 2: Pilihan Mode Performa ───────────────────────
+        # ── Group 2: Mode Performa ───────────────────────────────
         group_modes = Adw.PreferencesGroup()
-        group_modes.set_title("Kontrol Mode Performa & Daya")
+        group_modes.set_title("Pilih Mode Daya & Performa")
         group_modes.set_description("Pilih profil performa sesuai kebutuhan kerja Anda")
-        self.page.add(group_modes)
+        self.page_power.add(group_modes)
 
-        # Mode Powersave Row
         row_ps = Adw.ActionRow()
         row_ps.set_title("Mode Hemat Daya (Powersave)")
         row_ps.set_subtitle("CPU dibatasi 1.7–2.5 GHz, Turbo OFF, Profil Quiet")
@@ -156,7 +187,6 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         row_ps.add_suffix(btn_ps)
         group_modes.add(row_ps)
 
-        # Mode Performance Row
         row_perf = Adw.ActionRow()
         row_perf.set_title("Mode Performa Penuh (Performance)")
         row_perf.set_subtitle("CPU Maksimal 4.3 GHz, Turbo ON, Profil Performance")
@@ -169,7 +199,6 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         row_perf.add_suffix(btn_perf)
         group_modes.add(row_perf)
 
-        # Mode Auto Row
         row_auto = Adw.ActionRow()
         row_auto.set_title("Mode Otomatis (Auto-Switch)")
         row_auto.set_subtitle("Performa saat colok charger, Hemat saat baterai")
@@ -181,20 +210,17 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         row_auto.add_suffix(btn_auto)
         group_modes.add(row_auto)
 
-        # ── Group 3: Kontrol Kipas & Pendingin ────────────────────
+        # ── Group 3: Kontrol Kipas ───────────────────────────────
         group_fan = Adw.PreferencesGroup()
         group_fan.set_title("Kontrol Kipas & Pendingin (Dual Fan)")
-        group_fan.set_description("Atur kecepatan kipas pendingin hardware ASUS")
-        self.page.add(group_fan)
+        self.page_power.add(group_fan)
 
-        # Fan Live RPM Row
         self.row_fan_rpm = Adw.ActionRow()
         self.row_fan_rpm.set_title("Kecepatan Putaran Kipas")
         self.row_fan_rpm.set_subtitle("CPU Fan: -- RPM | GPU Fan: -- RPM")
         self.row_fan_rpm.set_icon_name("weather-windy-symbolic")
         group_fan.add(self.row_fan_rpm)
 
-        # Fan Profile Selector Row
         self.row_fan_ctrl = Adw.ActionRow()
         self.row_fan_ctrl.set_title("Profil Kecepatan Kipas")
         self.row_fan_ctrl.set_subtitle("Mode: Normal (Otomatis)")
@@ -223,12 +249,11 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.row_fan_ctrl.add_suffix(box_fan_btns)
         group_fan.add(self.row_fan_ctrl)
 
-        # ── Group 4: Pengaturan Hardware & Server ────────────────
+        # ── Group 4: Fitur Hardware & Server ─────────────────────
         group_hw = Adw.PreferencesGroup()
         group_hw.set_title("Fitur Hardware & Server")
-        self.page.add(group_hw)
+        self.page_power.add(group_hw)
 
-        # SwitchRow for 80% Threshold
         self.switch_threshold = Adw.SwitchRow()
         self.switch_threshold.set_title("Batas Cas Baterai 80% (Battery Health Care)")
         self.switch_threshold.set_subtitle("Membatasi pengisian di 80% untuk melindungi sel baterai")
@@ -236,7 +261,6 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.switch_threshold.connect("notify::active", self.on_threshold_toggled)
         group_hw.add(self.switch_threshold)
 
-        # Clamshell Status Row
         row_clamshell = Adw.ActionRow()
         row_clamshell.set_title("Mode Tutup Layar (Clamshell Server)")
         row_clamshell.set_subtitle("Layar mati saat ditutup, CPU & agent tetap jalan 100%")
@@ -248,19 +272,136 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         row_clamshell.add_suffix(lbl_cs)
         group_hw.add(row_clamshell)
 
-        # CPU Live Info
         self.row_cpu = Adw.ActionRow()
         self.row_cpu.set_title("CPU Monitor Real-time")
         self.row_cpu.set_subtitle("Memuat frekuensi...")
         self.row_cpu.set_icon_name("cpu-symbolic")
         group_hw.add(self.row_cpu)
 
-        # GPU Live Info
         self.row_gpu = Adw.ActionRow()
         self.row_gpu.set_title("Status NVIDIA GTX 1660 Ti")
         self.row_gpu.set_subtitle("Memuat status...")
         self.row_gpu.set_icon_name("video-display-symbolic")
         group_hw.add(self.row_gpu)
+
+        # ══════════════════════════════════════════════════════════
+        # TAB 2: KEYBOARD RGB (AURA LIGHTING)
+        # ══════════════════════════════════════════════════════════
+        self.page_rgb = Adw.PreferencesPage()
+        page_rgb_stack = self.stack.add_titled(self.page_rgb, "rgb", "Keyboard RGB")
+        page_rgb_stack.set_icon_name("input-keyboard-symbolic")
+
+        # ── Group 1: Kecerahan Backlight ─────────────────────────
+        group_rgb_bright = Adw.PreferencesGroup()
+        group_rgb_bright.set_title("Tingkat Kecerahan Keyboard")
+        self.page_rgb.add(group_rgb_bright)
+
+        self.row_rgb_bright = Adw.ActionRow()
+        self.row_rgb_bright.set_title("Kecerahan Lampu")
+        self.row_rgb_bright.set_subtitle("Tingkat 3 (Maksimal)")
+        self.row_rgb_bright.set_icon_name("display-brightness-symbolic")
+
+        box_bright_btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        box_bright_btns.set_valign(Gtk.Align.CENTER)
+        for b_val, b_lbl in [(0, "Mati"), (1, "Redup"), (2, "Sedang"), (3, "Terang")]:
+            btn = Gtk.Button(label=b_lbl)
+            btn.add_css_class("pill")
+            if b_val == 3:
+                btn.add_css_class("suggested-action")
+            btn.connect("clicked", lambda w, v=b_val: self.set_rgb_brightness_level(v))
+            box_bright_btns.append(btn)
+        self.row_rgb_bright.add_suffix(box_bright_btns)
+        group_rgb_bright.add(self.row_rgb_bright)
+
+        # ── Group 2: Efek Pencahayaan (Aura Effects) ─────────────
+        group_rgb_effects = Adw.PreferencesGroup()
+        group_rgb_effects.set_title("Efek Pencahayaan (Aura Lighting)")
+        group_rgb_effects.set_description("Pilih pola animasi lampu keyboard ASUS")
+        self.page_rgb.add(group_rgb_effects)
+
+        effects = [
+            ("0", "Static (Warna Tetap)", "Lampu menyala konstan dengan satu warna pilihan", "color-select-symbolic"),
+            ("1", "Breathing (Pernapasan)", "Lampu memudar dan menyala perlahan seperti bernapas", "weather-clear-night-symbolic"),
+            ("2", "Color Cycle (Rainbow)", "Siklus spektrum transisi warna-warni secara mulus", "emblem-photos-symbolic"),
+            ("3", "Strobing (Berkedip)", "Lampu berkedip cepat dengan ritme teratur", "dialog-warning-symbolic")
+        ]
+
+        for m_id, m_title, m_sub, m_icon in effects:
+            row_eff = Adw.ActionRow()
+            row_eff.set_title(m_title)
+            row_eff.set_subtitle(m_sub)
+            row_eff.set_icon_name(m_icon)
+            btn_eff = Gtk.Button(label="Pilih")
+            btn_eff.add_css_class("pill")
+            if m_id == "0":
+                btn_eff.add_css_class("suggested-action")
+            btn_eff.set_valign(Gtk.Align.CENTER)
+            btn_eff.connect("clicked", lambda w, mode=m_id: self.select_rgb_mode(mode))
+            row_eff.add_suffix(btn_eff)
+            group_rgb_effects.add(row_eff)
+
+        # ── Group 3: Pilihan Warna RGB ───────────────────────────
+        group_rgb_colors = Adw.PreferencesGroup()
+        group_rgb_colors.set_title("Palet Warna Keyboard")
+        group_rgb_colors.set_description("Pilih warna preset atau pilih kustom")
+        self.page_rgb.add(group_rgb_colors)
+
+        row_palette = Adw.ActionRow()
+        row_palette.set_title("Warna Preset Populer")
+        row_palette.set_subtitle("Klik warna untuk menerapkan")
+        row_palette.set_icon_name("applications-graphics-symbolic")
+
+        box_colors = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        box_colors.set_valign(Gtk.Align.CENTER)
+
+        presets = [
+            ("Cyan", 0, 200, 255, "#00c8ff"),
+            ("Biru", 0, 100, 255, "#0064ff"),
+            ("Ungu", 180, 0, 255, "#b400ff"),
+            ("Merah", 255, 0, 0, "#ff0000"),
+            ("Oranye", 255, 120, 0, "#ff7800"),
+            ("Kuning", 255, 220, 0, "#ffdc00"),
+            ("Hijau", 0, 255, 100, "#00ff64"),
+            ("Putih", 255, 255, 255, "#ffffff")
+        ]
+
+        for c_name, r, g, b, hex_c in presets:
+            btn_c = Gtk.Button()
+            btn_c.add_css_class("color-btn")
+            btn_c.set_tooltip_text(c_name)
+            
+            # CSS for color button
+            css_prov = Gtk.CssProvider()
+            css_prov.load_from_data(f"button {{ background-color: {hex_c}; }}".encode('utf-8'))
+            btn_c.get_style_context().add_provider(css_prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+            
+            btn_c.connect("clicked", lambda w, cr=r, cg=g, cb=b, cn=c_name: self.select_rgb_color(cr, cg, cb, cn))
+            box_colors.append(btn_c)
+
+        row_palette.add_suffix(box_colors)
+        group_rgb_colors.add(row_palette)
+
+        # ── Group 4: Kecepatan Animasi ───────────────────────────
+        group_rgb_speed = Adw.PreferencesGroup()
+        group_rgb_speed.set_title("Kecepatan Animasi Efek")
+        self.page_rgb.add(group_rgb_speed)
+
+        self.row_rgb_speed = Adw.ActionRow()
+        self.row_rgb_speed.set_title("Kecepatan Transisi")
+        self.row_rgb_speed.set_subtitle("Sedang (Normal)")
+        self.row_rgb_speed.set_icon_name("media-playback-start-symbolic")
+
+        box_speed_btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        box_speed_btns.set_valign(Gtk.Align.CENTER)
+        for s_val, s_lbl in [("0", "Lambat"), ("1", "Sedang"), ("2", "Cepat")]:
+            btn = Gtk.Button(label=s_lbl)
+            btn.add_css_class("pill")
+            if s_val == "1":
+                btn.add_css_class("suggested-action")
+            btn.connect("clicked", lambda w, sp=s_val, sl=s_lbl: self.select_rgb_speed(sp, sl))
+            box_speed_btns.append(btn)
+        self.row_rgb_speed.add_suffix(box_speed_btns)
+        group_rgb_speed.add(self.row_rgb_speed)
 
         # Initial Update & 3s Loop
         self.update_status()
@@ -306,7 +447,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
                     thresh_val = f.read().strip()
                 break
 
-            # 2. Read UPower for health capacity & drain rate
+            # 2. Read UPower
             energy_rate = ""
             health_cap = ""
             time_str = ""
@@ -328,7 +469,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             pct_num = float(bat_cap) if bat_cap.isdigit() else 80.0
             self.level_bar.set_value(pct_num)
 
-            # Format Titles based on AC and threshold
+            # Titles based on AC and threshold
             self.row_bat.set_title(f"Baterai: {bat_cap}%")
             
             if ac_online:
@@ -350,7 +491,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             est_txt = f" | Estimasi Sisa: {time_str}" if time_str and not ac_online else ""
             self.row_health.set_subtitle(f"Kesehatan Sel: {health_txt}{est_txt}")
 
-            # 3. Update Switch state without triggering feedback
+            # 3. Update Switch state
             is_80_active = (thresh_val == "80")
             if self.switch_threshold.get_active() != is_80_active:
                 self.switch_threshold.set_active(is_80_active)
@@ -390,8 +531,8 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             if os.path.exists("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq"):
                 with open("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq") as f:
                     freq_khz = f.read().strip()
-            if os.path.exists("/sys/devices/system/cpu/cpu0/cpufreq/boost"):
-                with open("/sys/devices/system/cpu/cpu0/cpufreq/boost") as f:
+            if os.path.exists("/sys/devices/system/cpu/cpufreq/boost"):
+                with open("/sys/devices/system/cpu/cpufreq/boost") as f:
                     boost = "Aktif" if f.read().strip() == "1" else "Nonaktif"
             
             freq_mhz = int(freq_khz) // 1000 if freq_khz.isdigit() else 0
@@ -411,7 +552,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
                     gpu_status = f.read().strip().capitalize()
             self.row_gpu.set_subtitle(f"Status Runtime: {gpu_status} (Hemat Daya)")
 
-        except Exception as e:
+        except Exception:
             pass
         finally:
             self._updating = False
@@ -455,6 +596,47 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             self.update_status()
         except Exception as e:
             self.show_toast(f"Gagal mengubah mode: {e}")
+
+    # ── RGB Handlers ───────────────────────────────────────────
+    def set_rgb_brightness_level(self, b_val):
+        self.rgb_brightness = b_val
+        b_labels = {0: "Mati (0%)", 1: "Redup (33%)", 2: "Sedang (66%)", 3: "Terang (100%)"}
+        self.row_rgb_bright.set_subtitle(f"Tingkat: {b_labels.get(b_val, str(b_val))}")
+        self.apply_rgb_settings()
+
+    def select_rgb_mode(self, mode):
+        self.rgb_mode = mode
+        mode_names = {"0": "Static", "1": "Breathing", "2": "Color Cycle", "3": "Strobing"}
+        self.apply_rgb_settings()
+        self.show_toast(f"Efek RGB Diatur ke: {mode_names.get(mode, mode)}")
+
+    def select_rgb_color(self, r, g, b, name):
+        self.rgb_r = r
+        self.rgb_g = g
+        self.rgb_b = b
+        self.apply_rgb_settings()
+        self.show_toast(f"Warna RGB Diatur ke: {name}")
+
+    def select_rgb_speed(self, speed, label):
+        self.rgb_speed = speed
+        self.row_rgb_speed.set_subtitle(label)
+        self.apply_rgb_settings()
+        self.show_toast(f"Kecepatan Efek: {label}")
+
+    def apply_rgb_settings(self):
+        try:
+            cmd = [
+                "sudo", "-n", get_script_path("battery-set-rgb.sh"),
+                str(self.rgb_mode),
+                str(self.rgb_r),
+                str(self.rgb_g),
+                str(self.rgb_b),
+                str(self.rgb_speed),
+                str(self.rgb_brightness)
+            ]
+            subprocess.run(cmd, check=True)
+        except Exception as e:
+            self.show_toast(f"Gagal menerapkan RGB: {e}")
 
 def main():
     app = BatteryManagerApp()
