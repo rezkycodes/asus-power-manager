@@ -29,6 +29,7 @@ mkdir -p %{buildroot}%{_bindir}
 mkdir -p %{buildroot}%{_libexecdir}/%{name}/scripts
 mkdir -p %{buildroot}%{_datadir}/applications
 mkdir -p %{buildroot}%{_datadir}/icons/hicolor/scalable/apps
+mkdir -p %{buildroot}%{_datadir}/%{name}/icons/lucide
 mkdir -p %{buildroot}%{_unitdir}
 mkdir -p %{buildroot}%{_udevrulesdir}
 mkdir -p %{buildroot}%{_sysctldir}
@@ -40,6 +41,7 @@ install -m 0755 %{_sourcedir}/src/asus-power-manager %{buildroot}%{_bindir}/asus
 install -m 0755 %{_sourcedir}/scripts/* %{buildroot}%{_libexecdir}/%{name}/scripts/
 install -m 0644 %{_sourcedir}/data/com.rezkycodes.BatteryManager.desktop %{buildroot}%{_datadir}/applications/
 install -m 0644 %{_sourcedir}/data/icons/hicolor/scalable/apps/com.rezkycodes.BatteryManager.svg %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/
+install -m 0644 %{_sourcedir}/data/icons/lucide/*.svg %{buildroot}%{_datadir}/%{name}/icons/lucide/
 install -m 0644 %{_sourcedir}/data/systemd/battery-charge-threshold.service %{buildroot}%{_unitdir}/
 install -m 0644 %{_sourcedir}/data/systemd/clamshell-server.conf %{buildroot}%{_sysconfdir}/systemd/logind.conf.d/
 install -m 0644 %{_sourcedir}/data/udev/*.rules %{buildroot}%{_udevrulesdir}/
@@ -72,6 +74,7 @@ gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor &>/dev/null || :
 %{_libexecdir}/%{name}
 %{_datadir}/applications/com.rezkycodes.BatteryManager.desktop
 %{_datadir}/icons/hicolor/scalable/apps/com.rezkycodes.BatteryManager.svg
+%{_datadir}/%{name}
 %{_unitdir}/battery-charge-threshold.service
 %config(noreplace) %{_sysconfdir}/systemd/logind.conf.d/clamshell-server.conf
 %{_udevrulesdir}/*.rules

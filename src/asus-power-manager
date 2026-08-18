@@ -24,9 +24,22 @@ def get_script_path(name):
             return target
     return name
 
+def register_lucide_icon_theme():
+    candidates = [
+        "/usr/share/asus-power-manager/icons/lucide",
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "icons", "lucide"),
+        os.path.expanduser("~/Development/asus-power-manager/data/icons/lucide")
+    ]
+    display = Gdk.Display.get_default()
+    if display:
+        icon_theme = Gtk.IconTheme.get_for_display(display)
+        for c in candidates:
+            if os.path.isdir(c):
+                icon_theme.add_search_path(c)
+
 def apply_custom_css():
     css = """
-    /* Force all symbolic icons to pure white */
+    /* Force all icons across the GUI to pure white */
     image, 
     image.dim-label, 
     image.symbolic,
@@ -115,6 +128,7 @@ class BatteryManagerApp(Adw.Application):
                          flags=Gio.ApplicationFlags.FLAGS_NONE)
 
     def do_activate(self):
+        register_lucide_icon_theme()
         apply_custom_css()
         win = self.props.active_window
         if not win:
@@ -159,8 +173,8 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         switcher.set_policy(Adw.ViewSwitcherPolicy.WIDE)
         header.set_title_widget(switcher)
 
-        # Refresh button in header
-        refresh_btn = Gtk.Button(icon_name="view-refresh-symbolic")
+        # Refresh button in header (Lucide Rotate-CW icon)
+        refresh_btn = Gtk.Button(icon_name="lucide-refresh-cw")
         refresh_btn.set_tooltip_text("Segarkan Status")
         refresh_btn.connect("clicked", lambda b: self.update_status())
         header.pack_end(refresh_btn)
@@ -171,11 +185,11 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.toolbar_view.set_content(self.toast_overlay)
 
         # ══════════════════════════════════════════════════════════
-        # TAB 1: DAYA & BATERAI
+        # TAB 1: DAYA & BATERAI (Lucide Icons)
         # ══════════════════════════════════════════════════════════
         self.page_power = Adw.PreferencesPage()
         stack_power = self.stack.add_titled(self.page_power, "power", "Daya & Baterai")
-        stack_power.set_icon_name("battery-level-80-charging-symbolic")
+        stack_power.set_icon_name("lucide-battery-charging")
 
         # ── Group 1: Status Baterai ──────────────────────────────
         group_battery = Adw.PreferencesGroup()
@@ -185,7 +199,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.row_bat = Adw.ActionRow()
         self.row_bat.set_title("Baterai: Memuat...")
         self.row_bat.set_subtitle("Status: Memuat...")
-        self.row_bat.set_icon_name("battery-symbolic")
+        self.row_bat.set_icon_name("lucide-battery")
         
         self.level_bar = Gtk.LevelBar()
         self.level_bar.set_min_value(0.0)
@@ -199,13 +213,13 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.row_drain = Adw.ActionRow()
         self.row_drain.set_title("Sumber Daya & Watt")
         self.row_drain.set_subtitle("Memuat...")
-        self.row_drain.set_icon_name("power-profile-balanced-symbolic")
+        self.row_drain.set_icon_name("lucide-zap")
         group_battery.add(self.row_drain)
 
         self.row_health = Adw.ActionRow()
         self.row_health.set_title("Kesehatan Baterai (Maksimum Pabrik)")
         self.row_health.set_subtitle("Memuat kapasitas...")
-        self.row_health.set_icon_name("emblem-favorite-symbolic")
+        self.row_health.set_icon_name("lucide-heart-pulse")
         group_battery.add(self.row_health)
 
         # ── Group 2: Mode Performa ───────────────────────────────
@@ -217,7 +231,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         row_ps = Adw.ActionRow()
         row_ps.set_title("Mode Hemat Daya (Powersave)")
         row_ps.set_subtitle("CPU dibatasi 1.7–2.5 GHz, Turbo OFF, Profil Quiet")
-        row_ps.set_icon_name("power-profile-power-saver-symbolic")
+        row_ps.set_icon_name("lucide-leaf")
         btn_ps = Gtk.Button(label="Aktifkan")
         btn_ps.add_css_class("suggested-action")
         btn_ps.add_css_class("pill")
@@ -229,7 +243,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         row_perf = Adw.ActionRow()
         row_perf.set_title("Mode Performa Penuh (Performance)")
         row_perf.set_subtitle("CPU Maksimal 4.3 GHz, Turbo ON, Profil Performance")
-        row_perf.set_icon_name("power-profile-performance-symbolic")
+        row_perf.set_icon_name("lucide-flame")
         btn_perf = Gtk.Button(label="Aktifkan")
         btn_perf.add_css_class("destructive-action")
         btn_perf.add_css_class("pill")
@@ -241,7 +255,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         row_auto = Adw.ActionRow()
         row_auto.set_title("Mode Otomatis (Auto-Switch)")
         row_auto.set_subtitle("Performa saat colok charger, Hemat saat baterai")
-        row_auto.set_icon_name("system-run-symbolic")
+        row_auto.set_icon_name("lucide-refresh-cw")
         btn_auto = Gtk.Button(label="Terapkan")
         btn_auto.add_css_class("pill")
         btn_auto.set_valign(Gtk.Align.CENTER)
@@ -257,13 +271,13 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.row_fan_rpm = Adw.ActionRow()
         self.row_fan_rpm.set_title("Kecepatan Putaran Kipas")
         self.row_fan_rpm.set_subtitle("CPU Fan: -- RPM | GPU Fan: -- RPM")
-        self.row_fan_rpm.set_icon_name("weather-windy-symbolic")
+        self.row_fan_rpm.set_icon_name("lucide-fan")
         group_fan.add(self.row_fan_rpm)
 
         self.row_fan_ctrl = Adw.ActionRow()
         self.row_fan_ctrl.set_title("Profil Kecepatan Kipas")
         self.row_fan_ctrl.set_subtitle("Mode: Normal (Otomatis)")
-        self.row_fan_ctrl.set_icon_name("preferences-system-symbolic")
+        self.row_fan_ctrl.set_icon_name("lucide-sliders")
 
         box_fan_btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         box_fan_btns.set_valign(Gtk.Align.CENTER)
@@ -294,14 +308,14 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.switch_threshold = Adw.SwitchRow()
         self.switch_threshold.set_title("Batas Cas Baterai 80% (Battery Health Care)")
         self.switch_threshold.set_subtitle("Membatasi pengisian di 80% untuk melindungi sel baterai")
-        self.switch_threshold.set_icon_name("battery-charging-symbolic")
+        self.switch_threshold.set_icon_name("lucide-shield-check")
         self.switch_threshold.connect("notify::active", self.on_threshold_toggled)
         group_hw.add(self.switch_threshold)
 
         row_clamshell = Adw.ActionRow()
         row_clamshell.set_title("Mode Tutup Layar (Clamshell Server)")
         row_clamshell.set_subtitle("Layar mati saat ditutup, CPU & agent tetap jalan 100%")
-        row_clamshell.set_icon_name("laptop-symbolic")
+        row_clamshell.set_icon_name("lucide-laptop")
         lbl_cs = Gtk.Label(label="Aktif")
         lbl_cs.add_css_class("success")
         lbl_cs.add_css_class("heading")
@@ -312,21 +326,21 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.row_cpu = Adw.ActionRow()
         self.row_cpu.set_title("CPU Monitor Real-time")
         self.row_cpu.set_subtitle("Memuat frekuensi...")
-        self.row_cpu.set_icon_name("cpu-symbolic")
+        self.row_cpu.set_icon_name("lucide-cpu")
         group_hw.add(self.row_cpu)
 
         self.row_gpu = Adw.ActionRow()
         self.row_gpu.set_title("Status NVIDIA GTX 1660 Ti")
         self.row_gpu.set_subtitle("Memuat status...")
-        self.row_gpu.set_icon_name("video-display-symbolic")
+        self.row_gpu.set_icon_name("lucide-monitor")
         group_hw.add(self.row_gpu)
 
         # ══════════════════════════════════════════════════════════
-        # TAB 2: KEYBOARD RGB (STUDIO WARNA & EFEK AURA)
+        # TAB 2: KEYBOARD RGB (Lucide Icons)
         # ══════════════════════════════════════════════════════════
         self.page_rgb = Adw.PreferencesPage()
         stack_rgb = self.stack.add_titled(self.page_rgb, "rgb", "Keyboard RGB")
-        stack_rgb.set_icon_name("input-keyboard-symbolic")
+        stack_rgb.set_icon_name("lucide-keyboard")
 
         # ── Group 1: Live Color Preview Hero Card ────────────────
         group_rgb_hero = Adw.PreferencesGroup()
@@ -336,7 +350,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.row_rgb_preview = Adw.ActionRow()
         self.row_rgb_preview.set_title("Warna Keyboard Saat Ini")
         self.row_rgb_preview.set_subtitle("RGB: (0, 200, 255) | Hex: #00C8FF | Mode: Static")
-        self.row_rgb_preview.set_icon_name("applications-graphics-symbolic")
+        self.row_rgb_preview.set_icon_name("lucide-palette")
 
         self.preview_area = Gtk.DrawingArea()
         self.preview_area.set_content_width(52)
@@ -400,7 +414,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         row_color_dialog = Adw.ActionRow()
         row_color_dialog.set_title("Dialog Lingkaran Spektrum Warna")
         row_color_dialog.set_subtitle("Buka dialog pemilih warna bebas GNOME")
-        row_color_dialog.set_icon_name("emblem-photos-symbolic")
+        row_color_dialog.set_icon_name("lucide-pipette")
 
         self.color_dialog = Gtk.ColorDialog()
         self.color_dialog.set_with_alpha(False)
@@ -468,19 +482,19 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.page_rgb.add(group_rgb_effects)
 
         effects = [
-            ("0", "Static (Warna Tetap)", "Lampu menyala konstan dengan satu warna pilihan"),
-            ("1", "Breathing (Pernapasan)", "Lampu memudar dan menyala perlahan"),
-            ("10", "Pulse (Denyut Jantung)", "Lampu berdenyut ritmis dengan warna pilihan"),
-            ("2", "Color Cycle (Rainbow Spektrum)", "Siklus spektrum transisi warna-warni secara mulus"),
-            ("3", "Strobing (Berkedip Cepat)", "Lampu berkedip strobo dengan ritme cepat")
+            ("0", "Static (Warna Tetap)", "Lampu menyala konstan dengan satu warna pilihan", "lucide-sun"),
+            ("1", "Breathing (Pernapasan)", "Lampu memudar dan menyala perlahan", "lucide-wind"),
+            ("10", "Pulse (Denyut Jantung)", "Lampu berdenyut ritmis dengan warna pilihan", "lucide-activity"),
+            ("2", "Color Cycle (Rainbow Spektrum)", "Siklus spektrum transisi warna-warni secara mulus", "lucide-sparkles"),
+            ("3", "Strobing (Berkedip Cepat)", "Lampu berkedip strobo dengan ritme cepat", "lucide-zap")
         ]
 
         self.effect_buttons = {}
-        for m_id, m_title, m_sub in effects:
+        for m_id, m_title, m_sub, m_icon in effects:
             row_eff = Adw.ActionRow()
             row_eff.set_title(m_title)
             row_eff.set_subtitle(m_sub)
-            row_eff.set_icon_name("media-playback-start-symbolic")
+            row_eff.set_icon_name(m_icon)
             btn_eff = Gtk.Button(label="Terapkan")
             btn_eff.add_css_class("pill")
             btn_eff.set_valign(Gtk.Align.CENTER)
@@ -500,7 +514,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.row_rgb_bright = Adw.ActionRow()
         self.row_rgb_bright.set_title("Kecerahan Lampu Keyboard")
         self.row_rgb_bright.set_subtitle(f"Tingkat {self.rgb_brightness} (Maksimal)" if self.rgb_brightness == 3 else f"Tingkat {self.rgb_brightness}")
-        self.row_rgb_bright.set_icon_name("display-brightness-symbolic")
+        self.row_rgb_bright.set_icon_name("lucide-sun")
 
         box_bright_btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         box_bright_btns.set_valign(Gtk.Align.CENTER)
@@ -520,7 +534,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.row_rgb_speed = Adw.ActionRow()
         self.row_rgb_speed.set_title("Kecepatan Animasi Efek")
         self.row_rgb_speed.set_subtitle("Sedang" if self.rgb_speed == "1" else ("Lambat" if self.rgb_speed == "0" else "Cepat"))
-        self.row_rgb_speed.set_icon_name("speedometer-symbolic")
+        self.row_rgb_speed.set_icon_name("lucide-gauge")
 
         box_speed_btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         box_speed_btns.set_valign(Gtk.Align.CENTER)
@@ -537,11 +551,11 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         group_rgb_settings.add(self.row_rgb_speed)
 
         # ══════════════════════════════════════════════════════════
-        # TAB 3: LAYANAN SYSTEMD (BACKGROUND SERVICES)
+        # TAB 3: LAYANAN SYSTEMD (Lucide Icons)
         # ══════════════════════════════════════════════════════════
         self.page_services = Adw.PreferencesPage()
         stack_services = self.stack.add_titled(self.page_services, "services", "Layanan Sistem")
-        stack_services.set_icon_name("system-run-symbolic")
+        stack_services.set_icon_name("lucide-server")
 
         # ── Group 1: User & AI Agent Services ────────────────────
         group_user_srv = Adw.PreferencesGroup()
@@ -549,14 +563,14 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         group_user_srv.set_description("Kelola dan pantau service background pengguna yang aktif 24/7")
         self.page_services.add(group_user_srv)
 
-        # List of user services
+        # List of user services with Lucide icons
         self.user_services = [
-            ("9router.service", "9router AI Proxy Gateway", "Port: 20128 (Local AI Gateway)", "network-server-symbolic"),
-            ("agentmemory.service", "AgentMemory Daemon Server", "Port: 3111 (AI Memory Bridge)", "drive-harddisk-symbolic"),
-            ("hermes-gateway.service", "Hermes Agent Gateway", "Bot Telegram & Messaging Integration", "user-available-symbolic"),
-            ("hermes-webui.service", "Hermes Web UI Interface", "Port: 8787 (Browser Dashboard)", "applications-internet-symbolic"),
-            ("code-server.service", "VS Code Remote Server", "Port: 8080 (Web IDE Browser)", "utilities-terminal-symbolic"),
-            ("ts-forward-watch.service", "Tailscale Port Forwarder", "Auto Forward Localhost Ports", "network-wireless-symbolic")
+            ("9router.service", "9router AI Proxy Gateway", "Port: 20128 (Local AI Gateway)", "lucide-network"),
+            ("agentmemory.service", "AgentMemory Daemon Server", "Port: 3111 (AI Memory Bridge)", "lucide-database"),
+            ("hermes-gateway.service", "Hermes Agent Gateway", "Bot Telegram & Messaging Integration", "lucide-bot"),
+            ("hermes-webui.service", "Hermes Web UI Interface", "Port: 8787 (Browser Dashboard)", "lucide-globe"),
+            ("code-server.service", "VS Code Remote Server", "Port: 8080 (Web IDE Browser)", "lucide-terminal"),
+            ("ts-forward-watch.service", "Tailscale Port Forwarder", "Auto Forward Localhost Ports", "lucide-radio")
         ]
 
         self.service_widgets = {}
@@ -577,7 +591,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             btn_toggle.add_css_class("pill")
             btn_toggle.connect("clicked", lambda w, u=s_unit, is_user=True: self.toggle_service_state(u, is_user))
 
-            btn_restart = Gtk.Button(icon_name="view-refresh-symbolic")
+            btn_restart = Gtk.Button(icon_name="lucide-refresh-cw")
             btn_restart.set_tooltip_text(f"Restart {s_unit}")
             btn_restart.add_css_class("pill")
             btn_restart.connect("clicked", lambda w, u=s_unit, is_user=True: self.restart_service(u, is_user))
@@ -603,11 +617,11 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.page_services.add(group_sys_srv)
 
         self.sys_services = [
-            ("ollama.service", "Ollama Local LLM Engine", "Port: 11434 (Hardware Local Model Runner)", "cpu-symbolic"),
-            ("tailscaled.service", "Tailscale Mesh VPN Daemon", "Jaringan VPN Remote Tanpa Port-Forwarding", "network-vpn-symbolic"),
-            ("sshd.service", "OpenSSH Server Daemon", "Port: 22 (Akses Terminal Jarak Jauh)", "preferences-system-network-symbolic"),
-            ("docker.service", "Docker Container Engine", "Runtime Kontainer & Layanan Virtual", "package-x-generic-symbolic"),
-            ("battery-charge-threshold.service", "Batas Baterai 80% Service", "Proteksi Hardware Pengisian Otomatis", "battery-charging-symbolic")
+            ("ollama.service", "Ollama Local LLM Engine", "Port: 11434 (Hardware Local Model Runner)", "lucide-bot"),
+            ("tailscaled.service", "Tailscale Mesh VPN Daemon", "Jaringan VPN Remote Tanpa Port-Forwarding", "lucide-shield"),
+            ("sshd.service", "OpenSSH Server Daemon", "Port: 22 (Akses Terminal Jarak Jauh)", "lucide-terminal"),
+            ("docker.service", "Docker Container Engine", "Runtime Kontainer & Layanan Virtual", "lucide-box"),
+            ("battery-charge-threshold.service", "Batas Baterai 80% Service", "Proteksi Hardware Pengisian Otomatis", "lucide-shield-check")
         ]
 
         for s_unit, s_title, s_sub, s_icon in self.sys_services:
@@ -626,7 +640,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             btn_toggle.add_css_class("pill")
             btn_toggle.connect("clicked", lambda w, u=s_unit, is_user=False: self.toggle_service_state(u, is_user))
 
-            btn_restart = Gtk.Button(icon_name="view-refresh-symbolic")
+            btn_restart = Gtk.Button(icon_name="lucide-refresh-cw")
             btn_restart.set_tooltip_text(f"Restart {s_unit}")
             btn_restart.add_css_class("pill")
             btn_restart.connect("clicked", lambda w, u=s_unit, is_user=False: self.restart_service(u, is_user))
@@ -826,6 +840,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
                 fan_mode_label = "Silent / Hening (Kecepatan Rendah)"
             self.row_fan_ctrl.set_subtitle(f"Status Aktif: {fan_mode_label}")
 
+            # Update fan button styling
             self.btn_fan_silent.remove_css_class("suggested-action")
             self.btn_fan_normal.remove_css_class("suggested-action")
             self.btn_fan_turbo.remove_css_class("suggested-action")
