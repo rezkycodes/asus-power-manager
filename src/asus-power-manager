@@ -389,6 +389,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.set_title("Power & Battery Manager")
+        self.set_icon_name("com.rezkycodes.BatteryManager")
         self.set_default_size(560, 800)
 
         # Internal state & guards
