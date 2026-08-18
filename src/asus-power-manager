@@ -9,17 +9,19 @@ gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
 from gi.repository import Gtk, Adw, GLib, Gio, Gdk
 
-# Script directory resolver
-SCRIPT_DIR = "/usr/libexec/asus-power-manager/scripts"
-if not os.path.isdir(SCRIPT_DIR):
-    local_dev = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts")
-    if os.path.isdir(local_dev):
-        SCRIPT_DIR = local_dev
-    else:
-        SCRIPT_DIR = os.path.expanduser("~/bin")
-
 def get_script_path(name):
-    return os.path.join(SCRIPT_DIR, name)
+    candidates = [
+        "/usr/libexec/asus-power-manager/scripts",
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"),
+        os.path.dirname(os.path.abspath(__file__)),
+        os.path.expanduser("~/bin"),
+        os.path.expanduser("~/Development/asus-power-manager/scripts")
+    ]
+    for d in candidates:
+        target = os.path.join(d, name)
+        if os.path.isfile(target):
+            return target
+    return name
 
 def apply_custom_css():
     css = """
@@ -388,8 +390,8 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             if os.path.exists("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq"):
                 with open("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq") as f:
                     freq_khz = f.read().strip()
-            if os.path.exists("/sys/devices/system/cpu/cpufreq/boost"):
-                with open("/sys/devices/system/cpu/cpufreq/boost") as f:
+            if os.path.exists("/sys/devices/system/cpu/cpu0/cpufreq/boost"):
+                with open("/sys/devices/system/cpu/cpu0/cpufreq/boost") as f:
                     boost = "Aktif" if f.read().strip() == "1" else "Nonaktif"
             
             freq_mhz = int(freq_khz) // 1000 if freq_khz.isdigit() else 0
