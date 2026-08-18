@@ -1,1 +1,1 @@
-SUBSYSTEM=="power_supply", ATTR{charge_control_end_threshold}="80"
+SUBSYSTEM=="power_supply", KERNEL=="BAT[0-9]*", ATTR{charge_control_end_threshold}="80"

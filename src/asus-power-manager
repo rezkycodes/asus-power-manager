@@ -63,7 +63,7 @@ def apply_custom_css():
         color: #ffffff !important;
     }
 
-    /* Modern Rounded-Rectangle Buttons (Agak kotak dengan radius halus 8px) */
+    /* Modern Rounded-Rectangle Buttons (8px radius) */
     button,
     button.pill,
     .pill,
@@ -83,7 +83,7 @@ def apply_custom_css():
         transform: scale(0.98);
     }
 
-    /* Color Swatch Button Wrapper */
+    /* Swatch Button Styling */
     .color-swatch-wrapper {
         padding: 3px;
         border-radius: 8px !important;
@@ -106,7 +106,7 @@ def apply_custom_css():
     scale.green-slider highlight { background: #34c759; }
     scale.blue-slider highlight { background: #007aff; }
 
-    /* Service Status Badges (Rounded-Rectangle with 6px radius) */
+    /* Service Status Badges */
     .badge-running {
         background-color: #2ec27e;
         color: #ffffff;
@@ -389,14 +389,14 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.set_title("Tweaks ASUS TUF")
-        self.set_icon_name("com.rezkycodes.BatteryManager")
-        self.set_default_size(560, 800)
+        self.set_default_size(560, 820)
 
         # Internal state & guards
         self._updating = False
         self._rgb_slider_updating = False
         self._debounce_timer_id = None
         
+        self.gpu_mode = "hybrid"   # hybrid | integrated | dedicated
         self.rgb_mode = "0"        # 0=Static, 1=Breathing, 2=Cycle, 3=Strobe, 10=Pulse
         self.rgb_r = 0
         self.rgb_g = 200
@@ -404,7 +404,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.rgb_speed = "1"       # 0=Slow, 1=Med, 2=Fast
         self.rgb_brightness = 3    # 0-3
 
-        self.load_saved_rgb_config()
+        self.load_saved_configs()
 
         self.toolbar_view = Adw.ToolbarView()
         self.set_content(self.toolbar_view)
@@ -429,12 +429,13 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.toolbar_view.set_content(self.toast_overlay)
 
         # ══════════════════════════════════════════════════════════
-        # TAB 1: DAYA & BATERAI
+        # TAB 1: DAYA, BATERAI & GPU
         # ══════════════════════════════════════════════════════════
         self.page_power = Adw.PreferencesPage()
         stack_power = self.stack.add_titled(self.page_power, "power", "Daya & Baterai")
         stack_power.set_icon_name("lucide-battery-charging")
 
+        # ── Group 1: Status Baterai ──────────────────────────────
         group_battery = Adw.PreferencesGroup()
         group_battery.set_title("Status Baterai & Daya")
         self.page_power.add(group_battery)
@@ -465,10 +466,57 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.row_health.set_icon_name("lucide-heart-pulse")
         group_battery.add(self.row_health)
 
-        # Group 2: Mode Performa
+        # ── Group 2: Mode Manajemen GPU (Hybrid / AMD / NVIDIA) ───
+        group_gpu = Adw.PreferencesGroup()
+        group_gpu.set_title("Manajemen & Mode GPU (Hybrid / AMD / NVIDIA)")
+        group_gpu.set_description("Atur peran grafis antara AMD Vega iGPU dan NVIDIA GTX 1660 Ti dGPU")
+        self.page_power.add(group_gpu)
+
+        # GPU Telemetry Row
+        self.row_gpu_telemetry = Adw.ActionRow()
+        self.row_gpu_telemetry.set_title("Status GPU NVIDIA GTX 1660 Ti")
+        self.row_gpu_telemetry.set_subtitle("Memuat telemetri...")
+        self.row_gpu_telemetry.set_icon_name("lucide-monitor")
+        group_gpu.add(self.row_gpu_telemetry)
+
+        # GPU Switcher Row
+        self.row_gpu_mode = Adw.ActionRow()
+        self.row_gpu_mode.set_title("Pilihan Mode Grafis")
+        self.row_gpu_mode.set_subtitle("Mode: Hybrid (On-Demand)")
+        self.row_gpu_mode.set_icon_name("lucide-sliders")
+
+        box_gpu_btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        box_gpu_btns.set_valign(Gtk.Align.CENTER)
+
+        self.btn_gpu_hybrid = Gtk.Button(label="⚡ Hybrid")
+        self.btn_gpu_hybrid.set_tooltip_text("Mode seimbang (AMD untuk desktop, NVIDIA otomatis saat dibutuhkan)")
+        self.btn_gpu_hybrid.connect("clicked", lambda b: self.set_gpu_mode("hybrid"))
+
+        self.btn_gpu_amd = Gtk.Button(label="🍃 AMD Only")
+        self.btn_gpu_amd.set_tooltip_text("Mode hemat daya total (Hanya menggunakan AMD iGPU)")
+        self.btn_gpu_amd.connect("clicked", lambda b: self.set_gpu_mode("integrated"))
+
+        self.btn_gpu_nvidia = Gtk.Button(label="🚀 NVIDIA")
+        self.btn_gpu_nvidia.set_tooltip_text("Mode performa grafis penuh (NVIDIA selalu siaga penuh)")
+        self.btn_gpu_nvidia.connect("clicked", lambda b: self.set_gpu_mode("dedicated"))
+
+        box_gpu_btns.append(self.btn_gpu_hybrid)
+        box_gpu_btns.append(self.btn_gpu_amd)
+        box_gpu_btns.append(self.btn_gpu_nvidia)
+        self.row_gpu_mode.add_suffix(box_gpu_btns)
+        group_gpu.add(self.row_gpu_mode)
+
+        # GPU Helper Info Row
+        row_gpu_hint = Adw.ActionRow()
+        row_gpu_hint.set_title("Peluncur Game / App Khusus NVIDIA")
+        row_gpu_hint.set_subtitle("__NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia %command%")
+        row_gpu_hint.set_icon_name("lucide-flame")
+        group_gpu.add(row_gpu_hint)
+
+        # ── Group 3: Mode Performa CPU ───────────────────────────
         group_modes = Adw.PreferencesGroup()
         group_modes.set_title("Kontrol Mode Performa & Daya")
-        group_modes.set_description("Pilih profil performa sesuai kebutuhan kerja Anda")
+        group_modes.set_description("Pilih profil performa prosesor sesuai kebutuhan kerja Anda")
         self.page_power.add(group_modes)
 
         row_ps = Adw.ActionRow()
@@ -503,7 +551,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         row_auto.add_suffix(btn_auto)
         group_modes.add(row_auto)
 
-        # Group 3: Kontrol Kipas
+        # ── Group 4: Kontrol Kipas ───────────────────────────────
         group_fan = Adw.PreferencesGroup()
         group_fan.set_title("Kontrol Kipas & Pendingin (Dual Fan)")
         self.page_power.add(group_fan)
@@ -539,7 +587,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.row_fan_ctrl.add_suffix(box_fan_btns)
         group_fan.add(self.row_fan_ctrl)
 
-        # Group 4: Fitur Hardware & Server
+        # ── Group 5: Fitur Hardware & Server ─────────────────────
         group_hw = Adw.PreferencesGroup()
         group_hw.set_title("Fitur Hardware & Server")
         self.page_power.add(group_hw)
@@ -567,12 +615,6 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.row_cpu.set_subtitle("Memuat frekuensi...")
         self.row_cpu.set_icon_name("lucide-cpu")
         group_hw.add(self.row_cpu)
-
-        self.row_gpu = Adw.ActionRow()
-        self.row_gpu.set_title("Status NVIDIA GTX 1660 Ti")
-        self.row_gpu.set_subtitle("Memuat status...")
-        self.row_gpu.set_icon_name("lucide-monitor")
-        group_hw.add(self.row_gpu)
 
         # ══════════════════════════════════════════════════════════
         # TAB 2: KEYBOARD RGB
@@ -936,7 +978,8 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         cr.set_line_width(2.0)
         cr.stroke()
 
-    def load_saved_rgb_config(self):
+    def load_saved_configs(self):
+        # 1. RGB Config
         conf_file = "/etc/asus-power-manager/rgb.conf"
         if os.path.exists(conf_file):
             try:
@@ -950,6 +993,17 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
                             elif k == "BLUE": self.rgb_b = int(v)
                             elif k == "SPEED": self.rgb_speed = v
                             elif k == "BRIGHTNESS": self.rgb_brightness = int(v)
+            except Exception:
+                pass
+        
+        # 2. GPU Config
+        gpu_conf = "/etc/asus-power-manager/gpu.conf"
+        if os.path.exists(gpu_conf):
+            try:
+                with open(gpu_conf) as f:
+                    for line in f:
+                        if line.startswith("GPU_MODE="):
+                            self.gpu_mode = line.strip().split("=", 1)[1]
             except Exception:
                 pass
 
@@ -1057,7 +1111,10 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             if self.switch_threshold.get_active() != is_80_active:
                 self.switch_threshold.set_active(is_80_active)
 
-            # 4. Fan Monitor & Status
+            # 4. Update GPU Telemetry & Mode Buttons
+            self.update_gpu_telemetry()
+
+            # 5. Fan Monitor & Status
             fan1_rpm = "--"
             fan2_rpm = "--"
             for f1 in glob.glob("/sys/devices/platform/asus-nb-wmi/hwmon/hwmon*/fan1_input"):
@@ -1089,7 +1146,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             elif fan_policy == "1": self.btn_fan_turbo.add_css_class("suggested-action")
             else: self.btn_fan_normal.add_css_class("suggested-action")
 
-            # 5. CPU Info
+            # 6. CPU Info
             gov = ""
             freq_khz = ""
             boost = ""
@@ -1112,14 +1169,6 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
 
             self.row_cpu.set_subtitle(f"Governor: {gov.upper()} @ {freq_mhz} MHz | Turbo: {boost} | Profil: {profile}")
 
-            # 6. GPU Info
-            gpu_status = "N/A"
-            gpu_file = "/sys/bus/pci/devices/0000:01:00.0/power/runtime_status"
-            if os.path.exists(gpu_file):
-                with open(gpu_file) as f:
-                    gpu_status = f.read().strip().capitalize()
-            self.row_gpu.set_subtitle(f"Status Runtime: {gpu_status} (Hemat Daya)")
-
             # 7. Update Systemd Services Tab
             self.update_services_status()
 
@@ -1127,6 +1176,69 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             pass
         finally:
             self._updating = False
+
+    def update_gpu_telemetry(self):
+        # Read live NVIDIA telemetry
+        gpu_temp = "--"
+        gpu_pwr = "--"
+        gpu_vram = "--"
+        gpu_util = "--"
+        gpu_pstate = "--"
+        pci_status = "Active"
+
+        pci_stat_file = "/sys/bus/pci/devices/0000:01:00.0/power/runtime_status"
+        if os.path.exists(pci_stat_file):
+            try:
+                with open(pci_stat_file) as f:
+                    pci_status = f.read().strip().capitalize()
+            except Exception:
+                pass
+
+        try:
+            smi_out = subprocess.check_output(
+                ["nvidia-smi", "--query-gpu=temperature.gpu,power.draw,memory.used,memory.total,utilization.gpu,pstate", "--format=csv,noheader,nounits"],
+                text=True, timeout=1.5
+            ).strip()
+            parts = [p.strip() for p in smi_out.split(",")]
+            if len(parts) >= 6:
+                gpu_temp, gpu_pwr, gpu_used, gpu_tot, gpu_util, gpu_pstate = parts
+                gpu_vram = f"{gpu_used}/{gpu_tot} MB"
+                gpu_pwr = f"{float(gpu_pwr):.1f} W"
+                gpu_temp = f"{gpu_temp}°C"
+                gpu_util = f"{gpu_util}%"
+        except Exception:
+            pass
+
+        self.row_gpu_telemetry.set_subtitle(f"Suhu: {gpu_temp} • Daya: {gpu_pwr} • VRAM: {gpu_vram} • P-State: {gpu_pstate} ({pci_status})")
+
+        # Update GPU mode button styles
+        self.btn_gpu_hybrid.remove_css_class("suggested-action")
+        self.btn_gpu_amd.remove_css_class("suggested-action")
+        self.btn_gpu_nvidia.remove_css_class("suggested-action")
+
+        if self.gpu_mode == "integrated" or self.gpu_mode == "1":
+            self.btn_gpu_amd.add_css_class("suggested-action")
+            self.row_gpu_mode.set_subtitle("Mode: AMD iGPU Only (NVIDIA Standby / Hemat Daya)")
+        elif self.gpu_mode == "dedicated" or self.gpu_mode == "2":
+            self.btn_gpu_nvidia.add_css_class("suggested-action")
+            self.row_gpu_mode.set_subtitle("Mode: NVIDIA Dedicated (Performa Grafis Penuh)")
+        else:
+            self.btn_gpu_hybrid.add_css_class("suggested-action")
+            self.row_gpu_mode.set_subtitle("Mode: Hybrid Optimus (Otomatis On-Demand)")
+
+    def set_gpu_mode(self, mode):
+        self.gpu_mode = mode
+        mode_labels = {
+            "hybrid": "Hybrid (On-Demand Optimus)",
+            "integrated": "AMD iGPU Only (Hemat Daya)",
+            "dedicated": "NVIDIA Dedicated (Performa Penuh)"
+        }
+        try:
+            subprocess.run(["sudo", "-n", get_script_path("battery-set-gpu.sh"), mode], check=True)
+            self.show_toast(f"Mode GPU Diatur ke: {mode_labels.get(mode, mode)}")
+            self.update_status()
+        except Exception as e:
+            self.show_toast(f"Gagal mengubah mode GPU: {e}")
 
     def update_services_status(self):
         for key, s_data in self.service_widgets.items():
