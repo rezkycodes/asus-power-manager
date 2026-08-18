@@ -39,7 +39,7 @@ def register_lucide_icon_theme():
 
 def apply_custom_css():
     css = """
-    /* Force all icons across the GUI to pure white */
+    /* Force all symbolic icons to pure white */
     image, 
     image.dim-label, 
     image.symbolic,
@@ -91,7 +91,7 @@ def apply_custom_css():
         background-color: #2ec27e;
         color: #ffffff;
         border-radius: 9999px;
-        padding: 2px 10px;
+        padding: 3px 12px;
         font-weight: bold;
         font-size: 11px;
     }
@@ -99,7 +99,7 @@ def apply_custom_css():
         background-color: #5e5c64;
         color: #ffffff;
         border-radius: 9999px;
-        padding: 2px 10px;
+        padding: 3px 12px;
         font-weight: bold;
         font-size: 11px;
     }
@@ -107,9 +107,18 @@ def apply_custom_css():
         background-color: #e01b24;
         color: #ffffff;
         border-radius: 9999px;
-        padding: 2px 10px;
+        padding: 3px 12px;
         font-weight: bold;
         font-size: 11px;
+    }
+
+    /* Code View Card */
+    .code-box {
+        font-family: monospace;
+        font-size: 12px;
+        padding: 12px;
+        background-color: alpha(currentColor, 0.05);
+        border-radius: 10px;
     }
     """
     css_provider = Gtk.CssProvider()
@@ -121,6 +130,236 @@ def apply_custom_css():
             css_provider,
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
         )
+
+class ServiceDetailWindow(Adw.Window):
+    def __init__(self, parent_win, unit_name, unit_title, is_user=True):
+        super().__init__()
+        self.parent_win = parent_win
+        self.unit_name = unit_name
+        self.is_user = is_user
+        
+        self.set_title(f"Detail — {unit_name}")
+        self.set_default_size(580, 720)
+        self.set_modal(True)
+        self.set_transient_for(parent_win)
+
+        toolbar_view = Adw.ToolbarView()
+        self.set_content(toolbar_view)
+
+        header = Adw.HeaderBar()
+        toolbar_view.add_top_bar(header)
+
+        # Refresh button in header
+        btn_refresh = Gtk.Button(icon_name="lucide-refresh-cw")
+        btn_refresh.set_tooltip_text("Segarkan Detail")
+        btn_refresh.connect("clicked", lambda b: self.load_data())
+        header.pack_end(btn_refresh)
+
+        # Content page
+        page = Adw.PreferencesPage()
+        toolbar_view.set_content(page)
+
+        # ── Group 1: Informasi & Status Runtime ───────────────────
+        group_info = Adw.PreferencesGroup()
+        group_info.set_title(unit_title)
+        group_info.set_description(f"Tipe: {'Layanan Pengguna (--user)' if is_user else 'Layanan Sistem (Root)'} • Unit: {unit_name}")
+        page.add(group_info)
+
+        self.row_status = Adw.ActionRow()
+        self.row_status.set_title("Status Operasional")
+        self.row_status.set_subtitle("Memuat...")
+        self.row_status.set_icon_name("lucide-server")
+        
+        self.lbl_badge = Gtk.Label(label="Memuat...")
+        self.lbl_badge.add_css_class("badge-stopped")
+        self.lbl_badge.set_valign(Gtk.Align.CENTER)
+        self.row_status.add_suffix(self.lbl_badge)
+        group_info.add(self.row_status)
+
+        self.row_resource = Adw.ActionRow()
+        self.row_resource.set_title("Resource & PID")
+        self.row_resource.set_subtitle("Memuat...")
+        self.row_resource.set_icon_name("lucide-cpu")
+        group_info.add(self.row_resource)
+
+        # ── Group 2: Script Systemd (.service file) ───────────────
+        group_script = Adw.PreferencesGroup()
+        group_script.set_title("File Konfigurasi Script Systemd")
+        group_script.set_description("Definisi unit file resmi yang dieksekusi oleh systemd")
+        
+        btn_copy = Gtk.Button(label="Salin Script")
+        btn_copy.add_css_class("pill")
+        btn_copy.connect("clicked", self.copy_script_to_clipboard)
+        group_script.set_header_suffix(btn_copy)
+        page.add(group_script)
+
+        # Code TextView inside scrolled box
+        self.script_buffer = Gtk.TextBuffer()
+        text_view = Gtk.TextView.new_with_buffer(self.script_buffer)
+        text_view.set_editable(False)
+        text_view.set_cursor_visible(False)
+        text_view.set_monospace(True)
+        text_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        text_view.add_css_class("code-box")
+
+        scrolled_script = Gtk.ScrolledWindow()
+        scrolled_script.set_min_content_height(200)
+        scrolled_script.set_max_content_height(280)
+        scrolled_script.set_child(text_view)
+
+        row_script = Adw.PreferencesRow()
+        row_script.set_child(scrolled_script)
+        group_script.add(row_script)
+
+        # ── Group 3: Log Jurnal Terbaru ──────────────────────────
+        group_logs = Adw.PreferencesGroup()
+        group_logs.set_title("Log Aktivitas Terbaru (Journald)")
+        page.add(group_logs)
+
+        self.logs_buffer = Gtk.TextBuffer()
+        logs_view = Gtk.TextView.new_with_buffer(self.logs_buffer)
+        logs_view.set_editable(False)
+        logs_view.set_cursor_visible(False)
+        logs_view.set_monospace(True)
+        logs_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        logs_view.add_css_class("code-box")
+
+        scrolled_logs = Gtk.ScrolledWindow()
+        scrolled_logs.set_min_content_height(140)
+        scrolled_logs.set_max_content_height(220)
+        scrolled_logs.set_child(logs_view)
+
+        row_logs = Adw.PreferencesRow()
+        row_logs.set_child(scrolled_logs)
+        group_logs.add(row_logs)
+
+        # ── Group 4: Kontrol Aksi Layanan ─────────────────────────
+        group_actions = Adw.PreferencesGroup()
+        group_actions.set_title("Kontrol Cepat Layanan")
+        page.add(group_actions)
+
+        row_ctrl = Adw.ActionRow()
+        row_ctrl.set_title("Kelola Proses")
+        row_ctrl.set_subtitle("Mulai, matikan, atau restart layanan ini")
+        row_ctrl.set_icon_name("lucide-sliders")
+
+        box_ctrl_btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        box_ctrl_btns.set_valign(Gtk.Align.CENTER)
+
+        self.btn_toggle = Gtk.Button(label="Start")
+        self.btn_toggle.add_css_class("pill")
+        self.btn_toggle.connect("clicked", lambda b: self.toggle_service())
+
+        self.btn_restart = Gtk.Button(label="Restart")
+        self.btn_restart.add_css_class("pill")
+        self.btn_restart.add_css_class("suggested-action")
+        self.btn_restart.connect("clicked", lambda b: self.restart_service())
+
+        box_ctrl_btns.append(self.btn_toggle)
+        box_ctrl_btns.append(self.btn_restart)
+        row_ctrl.add_suffix(box_ctrl_btns)
+        group_actions.add(row_ctrl)
+
+        self.load_data()
+
+    def load_data(self):
+        # 1. Status & Resource
+        cmd_status = ["systemctl", "--user", "status", self.unit_name, "--no-pager"] if self.is_user else ["systemctl", "status", self.unit_name, "--no-pager"]
+        try:
+            res_status = subprocess.run(cmd_status, capture_output=True, text=True)
+            out_txt = res_status.stdout + res_status.stderr
+            
+            active_line = "Unknown"
+            pid_line = "N/A"
+            mem_line = "N/A"
+
+            for line in out_txt.splitlines():
+                line_str = line.strip()
+                if line_str.startswith("Active:"):
+                    active_line = line_str.replace("Active:", "").strip()
+                elif line_str.startswith("Main PID:"):
+                    pid_line = line_str
+                elif line_str.startswith("Memory:"):
+                    mem_line = line_str
+
+            self.row_status.set_subtitle(active_line)
+            self.row_resource.set_subtitle(f"{pid_line} • {mem_line}")
+
+            is_running = "active (running)" in active_line or "active (exited)" in active_line
+            self.lbl_badge.remove_css_class("badge-running")
+            self.lbl_badge.remove_css_class("badge-stopped")
+            self.lbl_badge.remove_css_class("badge-failed")
+
+            if is_running:
+                self.lbl_badge.set_text("Aktif")
+                self.lbl_badge.add_css_class("badge-running")
+                self.btn_toggle.set_label("Hentikan (Stop)")
+                self.btn_toggle.add_css_class("destructive-action")
+            elif "failed" in active_line:
+                self.lbl_badge.set_text("Gagal")
+                self.lbl_badge.add_css_class("badge-failed")
+                self.btn_toggle.set_label("Jalankan (Start)")
+                self.btn_toggle.add_css_class("suggested-action")
+            else:
+                self.lbl_badge.set_text("Mati")
+                self.lbl_badge.add_css_class("badge-stopped")
+                self.btn_toggle.set_label("Jalankan (Start)")
+                self.btn_toggle.add_css_class("suggested-action")
+        except Exception as e:
+            self.row_status.set_subtitle(f"Error membaca status: {e}")
+
+        # 2. Cat Script (.service file content)
+        cmd_cat = ["systemctl", "--user", "cat", self.unit_name] if self.is_user else ["systemctl", "cat", self.unit_name]
+        try:
+            res_cat = subprocess.run(cmd_cat, capture_output=True, text=True)
+            script_text = res_cat.stdout.strip() if res_cat.stdout else "(Tidak ada script yang ditemukan)"
+            self.script_buffer.set_text(script_text)
+        except Exception as e:
+            self.script_buffer.set_text(f"Gagal membaca script: {e}")
+
+        # 3. Recent Logs
+        cmd_logs = ["journalctl", "--user", "-u", self.unit_name, "-n", "20", "--no-pager"] if self.is_user else ["journalctl", "-u", self.unit_name, "-n", "20", "--no-pager"]
+        try:
+            res_logs = subprocess.run(cmd_logs, capture_output=True, text=True)
+            logs_text = res_logs.stdout.strip() if res_logs.stdout else "(Belum ada catatan log)"
+            self.logs_buffer.set_text(logs_text)
+        except Exception as e:
+            self.logs_buffer.set_text(f"Gagal membaca log: {e}")
+
+    def copy_script_to_clipboard(self, btn):
+        text = self.script_buffer.get_text(
+            self.script_buffer.get_start_iter(),
+            self.script_buffer.get_end_iter(),
+            True
+        )
+        clipboard = Gdk.Display.get_default().get_clipboard()
+        clipboard.set(text)
+        if hasattr(self.parent_win, 'show_toast'):
+            self.parent_win.show_toast(f"Script {self.unit_name} disalin ke clipboard!")
+
+    def toggle_service(self):
+        cmd_chk = ["systemctl", "--user", "is-active", self.unit_name] if self.is_user else ["systemctl", "is-active", self.unit_name]
+        curr = subprocess.run(cmd_chk, capture_output=True, text=True).stdout.strip()
+        action = "stop" if curr == "active" else "start"
+        cmd = ["systemctl", "--user", action, self.unit_name] if self.is_user else ["sudo", "-n", "systemctl", action, self.unit_name]
+        try:
+            subprocess.run(cmd, check=True)
+            self.load_data()
+            if hasattr(self.parent_win, 'update_status'):
+                self.parent_win.update_status()
+        except Exception as e:
+            print(f"Error {action}: {e}")
+
+    def restart_service(self):
+        cmd = ["systemctl", "--user", "restart", self.unit_name] if self.is_user else ["sudo", "-n", "systemctl", "restart", self.unit_name]
+        try:
+            subprocess.run(cmd, check=True)
+            self.load_data()
+            if hasattr(self.parent_win, 'update_status'):
+                self.parent_win.update_status()
+        except Exception as e:
+            print(f"Error restart: {e}")
+
 
 class BatteryManagerApp(Adw.Application):
     def __init__(self):
@@ -292,6 +531,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
 
         self.btn_fan_turbo = Gtk.Button(label="Turbo")
         self.btn_fan_turbo.add_css_class("pill")
+        self.btn_fan_turbo.add_css_class("destructive-action")
         self.btn_fan_turbo.connect("clicked", lambda b: self.set_fan("1"))
 
         box_fan_btns.append(self.btn_fan_silent)
@@ -551,7 +791,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         group_rgb_settings.add(self.row_rgb_speed)
 
         # ══════════════════════════════════════════════════════════
-        # TAB 3: LAYANAN SYSTEMD (Lucide Icons)
+        # TAB 3: LAYANAN SYSTEMD (Lucide Icons + Clickable Details)
         # ══════════════════════════════════════════════════════════
         self.page_services = Adw.PreferencesPage()
         stack_services = self.stack.add_titled(self.page_services, "services", "Layanan Sistem")
@@ -560,7 +800,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         # ── Group 1: User & AI Agent Services ────────────────────
         group_user_srv = Adw.PreferencesGroup()
         group_user_srv.set_title("Layanan AI & Pengguna (User Daemons)")
-        group_user_srv.set_description("Kelola dan pantau service background pengguna yang aktif 24/7")
+        group_user_srv.set_description("Klik baris untuk melihat script .service lengkap, resource, dan log realtime")
         self.page_services.add(group_user_srv)
 
         # List of user services with Lucide icons
@@ -580,6 +820,8 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             row_s.set_title(s_title)
             row_s.set_subtitle(f"Unit: {s_unit} • {s_sub}")
             row_s.set_icon_name(s_icon)
+            row_s.set_activatable(True)
+            row_s.connect("activated", lambda r, u=s_unit, t=s_title, iu=True: self.open_service_detail(u, t, iu))
 
             box_actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
             box_actions.set_valign(Gtk.Align.CENTER)
@@ -596,9 +838,15 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             btn_restart.add_css_class("pill")
             btn_restart.connect("clicked", lambda w, u=s_unit, is_user=True: self.restart_service(u, is_user))
 
+            btn_detail = Gtk.Button(label="Detail")
+            btn_detail.add_css_class("pill")
+            btn_detail.set_tooltip_text("Buka Script & Log")
+            btn_detail.connect("clicked", lambda w, u=s_unit, t=s_title, iu=True: self.open_service_detail(u, t, iu))
+
             box_actions.append(lbl_badge)
             box_actions.append(btn_toggle)
             box_actions.append(btn_restart)
+            box_actions.append(btn_detail)
             row_s.add_suffix(box_actions)
 
             self.service_widgets[f"user:{s_unit}"] = {
@@ -613,7 +861,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         # ── Group 2: System Infrastructure Services ──────────────
         group_sys_srv = Adw.PreferencesGroup()
         group_sys_srv.set_title("Layanan Infrastruktur Sistem (Root Daemons)")
-        group_sys_srv.set_description("Service inti sistem Linux dan networking")
+        group_sys_srv.set_description("Klik baris untuk melihat script .service lengkap, resource, dan log realtime")
         self.page_services.add(group_sys_srv)
 
         self.sys_services = [
@@ -629,6 +877,8 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             row_s.set_title(s_title)
             row_s.set_subtitle(f"Unit: {s_unit} • {s_sub}")
             row_s.set_icon_name(s_icon)
+            row_s.set_activatable(True)
+            row_s.connect("activated", lambda r, u=s_unit, t=s_title, iu=False: self.open_service_detail(u, t, iu))
 
             box_actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
             box_actions.set_valign(Gtk.Align.CENTER)
@@ -645,9 +895,15 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             btn_restart.add_css_class("pill")
             btn_restart.connect("clicked", lambda w, u=s_unit, is_user=False: self.restart_service(u, is_user))
 
+            btn_detail = Gtk.Button(label="Detail")
+            btn_detail.add_css_class("pill")
+            btn_detail.set_tooltip_text("Buka Script & Log")
+            btn_detail.connect("clicked", lambda w, u=s_unit, t=s_title, iu=False: self.open_service_detail(u, t, iu))
+
             box_actions.append(lbl_badge)
             box_actions.append(btn_toggle)
             box_actions.append(btn_restart)
+            box_actions.append(btn_detail)
             row_s.add_suffix(box_actions)
 
             self.service_widgets[f"sys:{s_unit}"] = {
@@ -665,6 +921,10 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         # Initial Update & 3s Loop
         self.update_status()
         GLib.timeout_add_seconds(3, self.auto_refresh_tick)
+
+    def open_service_detail(self, unit, title, is_user):
+        win = ServiceDetailWindow(self, unit, title, is_user)
+        win.present()
 
     # ── Cairo Drawing Functions ────────────────────────────────
     def draw_palette_circle(self, area, cr, width, height, user_data):
@@ -840,7 +1100,6 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
                 fan_mode_label = "Silent / Hening (Kecepatan Rendah)"
             self.row_fan_ctrl.set_subtitle(f"Status Aktif: {fan_mode_label}")
 
-            # Update fan button styling
             self.btn_fan_silent.remove_css_class("suggested-action")
             self.btn_fan_normal.remove_css_class("suggested-action")
             self.btn_fan_turbo.remove_css_class("suggested-action")
