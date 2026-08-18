@@ -9,7 +9,6 @@ gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
 from gi.repository import Gtk, Adw, GLib, Gio, Gdk
 
-# Script directory resolver
 def get_script_path(name):
     candidates = [
         "/usr/libexec/asus-power-manager/scripts",
@@ -26,7 +25,7 @@ def get_script_path(name):
 
 def apply_custom_css():
     css = """
-    /* Force all icons across the GUI to pure white */
+    /* Force all symbolic icons to pure white */
     image, 
     image.dim-label, 
     image.symbolic,
@@ -37,7 +36,7 @@ def apply_custom_css():
     actionrow image, 
     adwactionrow image, 
     row image,
-    button image,
+    button.icon-btn image,
     headerbar button image,
     levelbar block {
         color: #ffffff !important;
@@ -50,16 +49,47 @@ def apply_custom_css():
         color: #ffffff !important;
     }
 
-    .color-btn {
-        border-radius: 9999px;
+    /* Vibrant Color Swatch Buttons */
+    .color-swatch-btn {
         min-width: 36px;
         min-height: 36px;
+        border-radius: 9999px;
         padding: 0;
+        margin: 2px;
         border: 2px solid rgba(255, 255, 255, 0.4);
+        box-shadow: 0 2px 5px rgba(0, 0, 0, 0.35);
+        transition: transform 120ms ease-in-out, border 120ms ease-in-out;
     }
-    .color-btn:checked, .color-btn:active {
-        border: 3px solid #ffffff;
+    .color-swatch-btn:hover {
+        transform: scale(1.12);
+        border: 2px solid #ffffff;
     }
+    .color-swatch-btn:active {
+        transform: scale(0.95);
+    }
+
+    /* Distinct Swatch Colors */
+    .swatch-cyan    { background: #00c8ff !important; background-color: #00c8ff !important; background-image: none !important; }
+    .swatch-blue    { background: #0064ff !important; background-color: #0064ff !important; background-image: none !important; }
+    .swatch-purple  { background: #a000ff !important; background-color: #a000ff !important; background-image: none !important; }
+    .swatch-magenta { background: #ff007f !important; background-color: #ff007f !important; background-image: none !important; }
+    .swatch-red     { background: #ff0000 !important; background-color: #ff0000 !important; background-image: none !important; }
+    .swatch-orange  { background: #ff7800 !important; background-color: #ff7800 !important; background-image: none !important; }
+    .swatch-yellow  { background: #ffd800 !important; background-color: #ffd800 !important; background-image: none !important; }
+    .swatch-green   { background: #00e676 !important; background-color: #00e676 !important; background-image: none !important; }
+    .swatch-white   { background: #ffffff !important; background-color: #ffffff !important; background-image: none !important; }
+
+    /* Live Color Preview Pill */
+    .live-preview-box {
+        border-radius: 12px;
+        border: 2px solid rgba(255, 255, 255, 0.3);
+        box-shadow: 0 3px 10px rgba(0,0,0,0.4);
+    }
+
+    /* Slider accent colors */
+    scale.red-slider highlight { background-color: #ff3b30; }
+    scale.green-slider highlight { background-color: #34c759; }
+    scale.blue-slider highlight { background-color: #007aff; }
     """
     css_provider = Gtk.CssProvider()
     css_provider.load_from_data(css.encode('utf-8'))
@@ -87,16 +117,20 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.set_title("Power & Battery Manager")
-        self.set_default_size(520, 740)
+        self.set_default_size(540, 780)
 
         # Internal state & guards
         self._updating = False
+        self._rgb_slider_updating = False
         self.rgb_mode = "0"        # 0=Static, 1=Breathing, 2=Cycle, 3=Strobe
         self.rgb_r = 0
         self.rgb_g = 200
         self.rgb_b = 255
         self.rgb_speed = "1"       # 0=Slow, 1=Med, 2=Fast
         self.rgb_brightness = 3    # 0-3
+
+        # Load saved RGB config if exists
+        self.load_saved_rgb_config()
 
         # Main Toolbar View
         self.toolbar_view = Adw.ToolbarView()
@@ -280,122 +314,213 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         group_hw.add(self.row_gpu)
 
         # ══════════════════════════════════════════════════════════
-        # TAB 2: KEYBOARD RGB (AURA LIGHTING)
+        # TAB 2: KEYBOARD RGB (STUDIO WARNA & EFEK AURA)
         # ══════════════════════════════════════════════════════════
         self.page_rgb = Adw.PreferencesPage()
         stack_rgb = self.stack.add_titled(self.page_rgb, "rgb", "Keyboard RGB")
         stack_rgb.set_icon_name("input-keyboard-symbolic")
 
-        # ── Group 1: Kecerahan Backlight ─────────────────────────
-        group_rgb_bright = Adw.PreferencesGroup()
-        group_rgb_bright.set_title("Tingkat Kecerahan Keyboard")
-        self.page_rgb.add(group_rgb_bright)
+        # ── Group 1: Live Color Preview Hero Card ────────────────
+        group_rgb_hero = Adw.PreferencesGroup()
+        group_rgb_hero.set_title("Status Warna & Efek Aktif")
+        self.page_rgb.add(group_rgb_hero)
 
+        self.row_rgb_preview = Adw.ActionRow()
+        self.row_rgb_preview.set_title("Warna Keyboard Saat Ini")
+        self.row_rgb_preview.set_subtitle("RGB: (0, 200, 255) | Mode: Static")
+        self.row_rgb_preview.set_icon_name("applications-graphics-symbolic")
+
+        # Live visual color swatch box
+        self.preview_box = Gtk.Box()
+        self.preview_box.set_size_request(48, 28)
+        self.preview_box.set_valign(Gtk.Align.CENTER)
+        self.preview_box.add_css_class("live-preview-box")
+        self.update_preview_box_color()
+        self.row_rgb_preview.add_suffix(self.preview_box)
+        group_rgb_hero.add(self.row_rgb_preview)
+
+        # ── Group 2: Palet Warna Cepat ───────────────────────────
+        group_rgb_palette = Adw.PreferencesGroup()
+        group_rgb_palette.set_title("Palet Warna Cepat (Preset)")
+        group_rgb_palette.set_description("Klik warna di bawah untuk mengubah warna seketika")
+        self.page_rgb.add(group_rgb_palette)
+
+        row_palette = Adw.ActionRow()
+        row_palette.set_title("Warna Pilihan Populer")
+        row_palette.set_subtitle("Pilih salah satu dari 9 warna preset")
+        row_palette.set_icon_name("color-select-symbolic")
+
+        box_swatches = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        box_swatches.set_valign(Gtk.Align.CENTER)
+
+        palette_list = [
+            ("Cyan", 0, 200, 255, "swatch-cyan"),
+            ("Biru", 0, 100, 255, "swatch-blue"),
+            ("Ungu", 160, 0, 255, "swatch-purple"),
+            ("Magenta", 255, 0, 127, "swatch-magenta"),
+            ("Merah", 255, 0, 0, "swatch-red"),
+            ("Oranye", 255, 120, 0, "swatch-orange"),
+            ("Kuning", 255, 216, 0, "swatch-yellow"),
+            ("Hijau", 0, 230, 118, "swatch-green"),
+            ("Putih", 255, 255, 255, "swatch-white")
+        ]
+
+        for c_name, r, g, b, css_cls in palette_list:
+            btn = Gtk.Button()
+            btn.add_css_class("color-swatch-btn")
+            btn.add_css_class(css_cls)
+            btn.set_tooltip_text(f"Pilih Warna {c_name}")
+            btn.connect("clicked", lambda w, cr=r, cg=g, cb=b, cn=c_name: self.apply_preset_color(cr, cg, cb, cn))
+            box_swatches.append(btn)
+
+        row_palette.add_suffix(box_swatches)
+        group_rgb_palette.add(row_palette)
+
+        # ── Group 3: Color Wheel & Custom Color Picker ───────────
+        group_rgb_custom = Adw.PreferencesGroup()
+        group_rgb_custom.set_title("Pilih Warna Bebas (Color Wheel)")
+        self.page_rgb.add(group_rgb_custom)
+
+        row_color_dialog = Adw.ActionRow()
+        row_color_dialog.set_title("Color Picker Dialog (Lingkaran Warna)")
+        row_color_dialog.set_subtitle("Buka dialog pemilih warna spektrum bebas")
+        row_color_dialog.set_icon_name("emblem-photos-symbolic")
+
+        # Native GNOME ColorDialogButton
+        self.color_dialog = Gtk.ColorDialog()
+        self.color_dialog.set_with_alpha(False)
+        self.color_btn = Gtk.ColorDialogButton(dialog=self.color_dialog)
+        self.color_btn.set_valign(Gtk.Align.CENTER)
+        
+        init_rgba = Gdk.RGBA()
+        init_rgba.red = self.rgb_r / 255.0
+        init_rgba.green = self.rgb_g / 255.0
+        init_rgba.blue = self.rgb_b / 255.0
+        init_rgba.alpha = 1.0
+        self.color_btn.set_rgba(init_rgba)
+        self.color_btn.connect("notify::rgba", self.on_color_dialog_changed)
+        
+        row_color_dialog.add_suffix(self.color_btn)
+        group_rgb_custom.add(row_color_dialog)
+
+        # RGB Sliders
+        group_rgb_sliders = Adw.PreferencesGroup()
+        group_rgb_sliders.set_title("Penyesuaian Manual (Slider RGB)")
+        self.page_rgb.add(group_rgb_sliders)
+
+        # Red Slider
+        self.row_slider_r = Adw.ActionRow()
+        self.row_slider_r.set_title("Merah (Red)")
+        self.row_slider_r.set_subtitle(f"Nilai: {self.rgb_r}")
+        self.scale_r = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 255, 1)
+        self.scale_r.set_value(self.rgb_r)
+        self.scale_r.set_size_request(160, -1)
+        self.scale_r.set_valign(Gtk.Align.CENTER)
+        self.scale_r.add_css_class("red-slider")
+        self.scale_r.connect("value-changed", self.on_rgb_slider_changed)
+        self.row_slider_r.add_suffix(self.scale_r)
+        group_rgb_sliders.add(self.row_slider_r)
+
+        # Green Slider
+        self.row_slider_g = Adw.ActionRow()
+        self.row_slider_g.set_title("Hijau (Green)")
+        self.row_slider_g.set_subtitle(f"Nilai: {self.rgb_g}")
+        self.scale_g = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 255, 1)
+        self.scale_g.set_value(self.rgb_g)
+        self.scale_g.set_size_request(160, -1)
+        self.scale_g.set_valign(Gtk.Align.CENTER)
+        self.scale_g.add_css_class("green-slider")
+        self.scale_g.connect("value-changed", self.on_rgb_slider_changed)
+        self.row_slider_g.add_suffix(self.scale_g)
+        group_rgb_sliders.add(self.row_slider_g)
+
+        # Blue Slider
+        self.row_slider_b = Adw.ActionRow()
+        self.row_slider_b.set_title("Biru (Blue)")
+        self.row_slider_b.set_subtitle(f"Nilai: {self.rgb_b}")
+        self.scale_b = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 255, 1)
+        self.scale_b.set_value(self.rgb_b)
+        self.scale_b.set_size_request(160, -1)
+        self.scale_b.set_valign(Gtk.Align.CENTER)
+        self.scale_b.add_css_class("blue-slider")
+        self.scale_b.connect("value-changed", self.on_rgb_slider_changed)
+        self.row_slider_b.add_suffix(self.scale_b)
+        group_rgb_sliders.add(self.row_slider_b)
+
+        # ── Group 4: Efek Pencahayaan (Aura Effects) ─────────────
+        group_rgb_effects = Adw.PreferencesGroup()
+        group_rgb_effects.set_title("Pilihan Efek Animasi (Aura Lighting)")
+        self.page_rgb.add(group_rgb_effects)
+
+        effects = [
+            ("0", "Static (Warna Tetap)", "Lampu menyala konstan dengan satu warna pilihan"),
+            ("1", "Breathing (Pernapasan)", "Lampu memudar dan menyala perlahan seperti bernapas"),
+            ("2", "Color Cycle (Rainbow Spektrum)", "Siklus spektrum transisi warna-warni secara mulus"),
+            ("3", "Strobing (Berkedip)", "Lampu berkedip cepat dengan ritme teratur")
+        ]
+
+        self.effect_buttons = {}
+        for m_id, m_title, m_sub in effects:
+            row_eff = Adw.ActionRow()
+            row_eff.set_title(m_title)
+            row_eff.set_subtitle(m_sub)
+            row_eff.set_icon_name("media-playback-start-symbolic")
+            btn_eff = Gtk.Button(label="Terapkan")
+            btn_eff.add_css_class("pill")
+            btn_eff.set_valign(Gtk.Align.CENTER)
+            btn_eff.connect("clicked", lambda w, mode=m_id: self.select_rgb_mode(mode))
+            self.effect_buttons[m_id] = btn_eff
+            row_eff.add_suffix(btn_eff)
+            group_rgb_effects.add(row_eff)
+
+        # Highlight initial mode
+        if self.rgb_mode in self.effect_buttons:
+            self.effect_buttons[self.rgb_mode].add_css_class("suggested-action")
+
+        # ── Group 5: Kecerahan & Kecepatan ───────────────────────
+        group_rgb_settings = Adw.PreferencesGroup()
+        group_rgb_settings.set_title("Kecerahan & Kecepatan Efek")
+        self.page_rgb.add(group_rgb_settings)
+
+        # Brightness
         self.row_rgb_bright = Adw.ActionRow()
-        self.row_rgb_bright.set_title("Kecerahan Lampu")
-        self.row_rgb_bright.set_subtitle("Tingkat 3 (Maksimal)")
+        self.row_rgb_bright.set_title("Kecerahan Lampu Keyboard")
+        self.row_rgb_bright.set_subtitle(f"Tingkat {self.rgb_brightness} (Maksimal)" if self.rgb_brightness == 3 else f"Tingkat {self.rgb_brightness}")
         self.row_rgb_bright.set_icon_name("display-brightness-symbolic")
 
         box_bright_btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         box_bright_btns.set_valign(Gtk.Align.CENTER)
+        self.bright_buttons = {}
         for b_val, b_lbl in [(0, "Mati"), (1, "Redup"), (2, "Sedang"), (3, "Terang")]:
             btn = Gtk.Button(label=b_lbl)
             btn.add_css_class("pill")
-            if b_val == 3:
+            if b_val == self.rgb_brightness:
                 btn.add_css_class("suggested-action")
             btn.connect("clicked", lambda w, v=b_val: self.set_rgb_brightness_level(v))
+            self.bright_buttons[b_val] = btn
             box_bright_btns.append(btn)
         self.row_rgb_bright.add_suffix(box_bright_btns)
-        group_rgb_bright.add(self.row_rgb_bright)
+        group_rgb_settings.add(self.row_rgb_bright)
 
-        # ── Group 2: Efek Pencahayaan (Aura Effects) ─────────────
-        group_rgb_effects = Adw.PreferencesGroup()
-        group_rgb_effects.set_title("Efek Pencahayaan (Aura Lighting)")
-        group_rgb_effects.set_description("Pilih pola animasi lampu keyboard ASUS")
-        self.page_rgb.add(group_rgb_effects)
-
-        effects = [
-            ("0", "Static (Warna Tetap)", "Lampu menyala konstan dengan satu warna pilihan", "color-select-symbolic"),
-            ("1", "Breathing (Pernapasan)", "Lampu memudar dan menyala perlahan seperti bernapas", "weather-clear-night-symbolic"),
-            ("2", "Color Cycle (Rainbow)", "Siklus spektrum transisi warna-warni secara mulus", "emblem-photos-symbolic"),
-            ("3", "Strobing (Berkedip)", "Lampu berkedip cepat dengan ritme teratur", "dialog-warning-symbolic")
-        ]
-
-        for m_id, m_title, m_sub, m_icon in effects:
-            row_eff = Adw.ActionRow()
-            row_eff.set_title(m_title)
-            row_eff.set_subtitle(m_sub)
-            row_eff.set_icon_name(m_icon)
-            btn_eff = Gtk.Button(label="Pilih")
-            btn_eff.add_css_class("pill")
-            if m_id == "0":
-                btn_eff.add_css_class("suggested-action")
-            btn_eff.set_valign(Gtk.Align.CENTER)
-            btn_eff.connect("clicked", lambda w, mode=m_id: self.select_rgb_mode(mode))
-            row_eff.add_suffix(btn_eff)
-            group_rgb_effects.add(row_eff)
-
-        # ── Group 3: Pilihan Warna RGB ───────────────────────────
-        group_rgb_colors = Adw.PreferencesGroup()
-        group_rgb_colors.set_title("Palet Warna Keyboard")
-        group_rgb_colors.set_description("Pilih warna preset atau pilih kustom")
-        self.page_rgb.add(group_rgb_colors)
-
-        row_palette = Adw.ActionRow()
-        row_palette.set_title("Warna Preset Populer")
-        row_palette.set_subtitle("Klik warna untuk menerapkan")
-        row_palette.set_icon_name("applications-graphics-symbolic")
-
-        box_colors = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        box_colors.set_valign(Gtk.Align.CENTER)
-
-        presets = [
-            ("Cyan", 0, 200, 255, "#00c8ff"),
-            ("Biru", 0, 100, 255, "#0064ff"),
-            ("Ungu", 180, 0, 255, "#b400ff"),
-            ("Merah", 255, 0, 0, "#ff0000"),
-            ("Oranye", 255, 120, 0, "#ff7800"),
-            ("Kuning", 255, 220, 0, "#ffdc00"),
-            ("Hijau", 0, 255, 100, "#00ff64"),
-            ("Putih", 255, 255, 255, "#ffffff")
-        ]
-
-        for c_name, r, g, b, hex_c in presets:
-            btn_c = Gtk.Button()
-            btn_c.add_css_class("color-btn")
-            btn_c.set_tooltip_text(c_name)
-            
-            css_prov = Gtk.CssProvider()
-            css_prov.load_from_data(f"button {{ background-color: {hex_c}; }}".encode('utf-8'))
-            btn_c.get_style_context().add_provider(css_prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
-            
-            btn_c.connect("clicked", lambda w, cr=r, cg=g, cb=b, cn=c_name: self.select_rgb_color(cr, cg, cb, cn))
-            box_colors.append(btn_c)
-
-        row_palette.add_suffix(box_colors)
-        group_rgb_colors.add(row_palette)
-
-        # ── Group 4: Kecepatan Animasi ───────────────────────────
-        group_rgb_speed = Adw.PreferencesGroup()
-        group_rgb_speed.set_title("Kecepatan Animasi Efek")
-        self.page_rgb.add(group_rgb_speed)
-
+        # Speed
         self.row_rgb_speed = Adw.ActionRow()
-        self.row_rgb_speed.set_title("Kecepatan Transisi")
-        self.row_rgb_speed.set_subtitle("Sedang (Normal)")
-        self.row_rgb_speed.set_icon_name("media-playback-start-symbolic")
+        self.row_rgb_speed.set_title("Kecepatan Animasi Efek")
+        self.row_rgb_speed.set_subtitle("Sedang" if self.rgb_speed == "1" else ("Lambat" if self.rgb_speed == "0" else "Cepat"))
+        self.row_rgb_speed.set_icon_name("speedometer-symbolic")
 
         box_speed_btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         box_speed_btns.set_valign(Gtk.Align.CENTER)
+        self.speed_buttons = {}
         for s_val, s_lbl in [("0", "Lambat"), ("1", "Sedang"), ("2", "Cepat")]:
             btn = Gtk.Button(label=s_lbl)
             btn.add_css_class("pill")
-            if s_val == "1":
+            if s_val == self.rgb_speed:
                 btn.add_css_class("suggested-action")
             btn.connect("clicked", lambda w, sp=s_val, sl=s_lbl: self.select_rgb_speed(sp, sl))
+            self.speed_buttons[s_val] = btn
             box_speed_btns.append(btn)
         self.row_rgb_speed.add_suffix(box_speed_btns)
-        group_rgb_speed.add(self.row_rgb_speed)
+        group_rgb_settings.add(self.row_rgb_speed)
 
         # Explicitly make "power" tab visible on startup
         self.stack.set_visible_child_name("power")
@@ -403,6 +528,31 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         # Initial Update & 3s Loop
         self.update_status()
         GLib.timeout_add_seconds(3, self.auto_refresh_tick)
+
+    def load_saved_rgb_config(self):
+        conf_file = "/etc/asus-power-manager/rgb.conf"
+        if os.path.exists(conf_file):
+            try:
+                with open(conf_file) as f:
+                    for line in f:
+                        k, v = line.strip().split("=", 1)
+                        if k == "MODE": self.rgb_mode = v
+                        elif k == "RED": self.rgb_r = int(v)
+                        elif k == "GREEN": self.rgb_g = int(v)
+                        elif k == "BLUE": self.rgb_b = int(v)
+                        elif k == "SPEED": self.rgb_speed = v
+                        elif k == "BRIGHTNESS": self.rgb_brightness = int(v)
+            except Exception:
+                pass
+
+    def update_preview_box_color(self):
+        hex_color = f"#{self.rgb_r:02x}{self.rgb_g:02x}{self.rgb_b:02x}"
+        css_prov = Gtk.CssProvider()
+        css_prov.load_from_data(f".live-preview-box {{ background-color: {hex_color} !important; }}".encode('utf-8'))
+        self.preview_box.get_style_context().add_provider(css_prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        
+        mode_names = {"0": "Static", "1": "Breathing", "2": "Color Cycle", "3": "Strobing"}
+        self.row_rgb_preview.set_subtitle(f"RGB: ({self.rgb_r}, {self.rgb_g}, {self.rgb_b}) | Hex: {hex_color.upper()} | Mode: {mode_names.get(self.rgb_mode, 'Static')}")
 
     def auto_refresh_tick(self):
         self.update_status()
@@ -466,7 +616,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             pct_num = float(bat_cap) if bat_cap.isdigit() else 80.0
             self.level_bar.set_value(pct_num)
 
-            # Titles based on AC and threshold
+            # Format Titles based on AC and threshold
             self.row_bat.set_title(f"Baterai: {bat_cap}%")
             
             if ac_online:
@@ -594,33 +744,124 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         except Exception as e:
             self.show_toast(f"Gagal mengubah mode: {e}")
 
-    # ── RGB Handlers ───────────────────────────────────────────
-    def set_rgb_brightness_level(self, b_val):
-        self.rgb_brightness = b_val
-        b_labels = {0: "Mati (0%)", 1: "Redup (33%)", 2: "Sedang (66%)", 3: "Terang (100%)"}
-        self.row_rgb_bright.set_subtitle(f"Tingkat: {b_labels.get(b_val, str(b_val))}")
-        self.apply_rgb_settings()
+    # ── RGB Studio Handlers ────────────────────────────────────
+    def apply_preset_color(self, r, g, b, name):
+        self.rgb_r = r
+        self.rgb_g = g
+        self.rgb_b = b
+        
+        # Update sliders without feedback loop
+        self._rgb_slider_updating = True
+        self.scale_r.set_value(r)
+        self.scale_g.set_value(g)
+        self.scale_b.set_value(b)
+        self.row_slider_r.set_subtitle(f"Nilai: {r}")
+        self.row_slider_g.set_subtitle(f"Nilai: {g}")
+        self.row_slider_b.set_subtitle(f"Nilai: {b}")
+        self._rgb_slider_updating = False
+
+        # Update Color Dialog Button
+        rgba = Gdk.RGBA()
+        rgba.red = r / 255.0
+        rgba.green = g / 255.0
+        rgba.blue = b / 255.0
+        rgba.alpha = 1.0
+        self.color_btn.set_rgba(rgba)
+
+        self.update_preview_box_color()
+        self.apply_rgb_hardware()
+        self.show_toast(f"Warna RGB Diatur ke: {name}")
+
+    def on_color_dialog_changed(self, btn, gparam):
+        rgba = btn.get_rgba()
+        r = int(rgba.red * 255)
+        g = int(rgba.green * 255)
+        b = int(rgba.blue * 255)
+        
+        self.rgb_r = r
+        self.rgb_g = g
+        self.rgb_b = b
+
+        self._rgb_slider_updating = True
+        self.scale_r.set_value(r)
+        self.scale_g.set_value(g)
+        self.scale_b.set_value(b)
+        self.row_slider_r.set_subtitle(f"Nilai: {r}")
+        self.row_slider_g.set_subtitle(f"Nilai: {g}")
+        self.row_slider_b.set_subtitle(f"Nilai: {b}")
+        self._rgb_slider_updating = False
+
+        self.update_preview_box_color()
+        self.apply_rgb_hardware()
+
+    def on_rgb_slider_changed(self, scale):
+        if self._rgb_slider_updating:
+            return
+        
+        r = int(self.scale_r.get_value())
+        g = int(self.scale_g.get_value())
+        b = int(self.scale_b.get_value())
+
+        self.rgb_r = r
+        self.rgb_g = g
+        self.rgb_b = b
+
+        self.row_slider_r.set_subtitle(f"Nilai: {r}")
+        self.row_slider_g.set_subtitle(f"Nilai: {g}")
+        self.row_slider_b.set_subtitle(f"Nilai: {b}")
+
+        # Update color dialog button
+        rgba = Gdk.RGBA()
+        rgba.red = r / 255.0
+        rgba.green = g / 255.0
+        rgba.blue = b / 255.0
+        rgba.alpha = 1.0
+        self.color_btn.set_rgba(rgba)
+
+        self.update_preview_box_color()
+        self.apply_rgb_hardware()
 
     def select_rgb_mode(self, mode):
         self.rgb_mode = mode
         mode_names = {"0": "Static", "1": "Breathing", "2": "Color Cycle", "3": "Strobing"}
-        self.apply_rgb_settings()
+        
+        for m_id, btn in self.effect_buttons.items():
+            if m_id == mode:
+                btn.add_css_class("suggested-action")
+            else:
+                btn.remove_css_class("suggested-action")
+
+        self.update_preview_box_color()
+        self.apply_rgb_hardware()
         self.show_toast(f"Efek RGB Diatur ke: {mode_names.get(mode, mode)}")
 
-    def select_rgb_color(self, r, g, b, name):
-        self.rgb_r = r
-        self.rgb_g = g
-        self.rgb_b = b
-        self.apply_rgb_settings()
-        self.show_toast(f"Warna RGB Diatur ke: {name}")
+    def set_rgb_brightness_level(self, b_val):
+        self.rgb_brightness = b_val
+        b_labels = {0: "Mati (0%)", 1: "Redup (33%)", 2: "Sedang (66%)", 3: "Terang (100%)"}
+        self.row_rgb_bright.set_subtitle(f"Tingkat {b_val} ({b_labels.get(b_val, str(b_val))})")
+        
+        for v, btn in self.bright_buttons.items():
+            if v == b_val:
+                btn.add_css_class("suggested-action")
+            else:
+                btn.remove_css_class("suggested-action")
+
+        self.apply_rgb_hardware()
 
     def select_rgb_speed(self, speed, label):
         self.rgb_speed = speed
         self.row_rgb_speed.set_subtitle(label)
-        self.apply_rgb_settings()
+        
+        for s, btn in self.speed_buttons.items():
+            if s == speed:
+                btn.add_css_class("suggested-action")
+            else:
+                btn.remove_css_class("suggested-action")
+
+        self.apply_rgb_hardware()
         self.show_toast(f"Kecepatan Efek: {label}")
 
-    def apply_rgb_settings(self):
+    def apply_rgb_hardware(self):
         try:
             cmd = [
                 "sudo", "-n", get_script_path("battery-set-rgb.sh"),
