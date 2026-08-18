@@ -396,13 +396,14 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self._rgb_slider_updating = False
         self._debounce_timer_id = None
         
-        self.gpu_mode = "hybrid"   # hybrid | integrated | dedicated
-        self.rgb_mode = "0"        # 0=Static, 1=Breathing, 2=Cycle, 3=Strobe, 10=Pulse
+        self.current_power_mode = "auto" # powersave | performance | auto
+        self.gpu_mode = "hybrid"         # hybrid | integrated | dedicated
+        self.rgb_mode = "0"              # 0=Static, 1=Breathing, 2=Cycle, 3=Strobe, 10=Pulse
         self.rgb_r = 0
         self.rgb_g = 200
         self.rgb_b = 255
-        self.rgb_speed = "1"       # 0=Slow, 1=Med, 2=Fast
-        self.rgb_brightness = 3    # 0-3
+        self.rgb_speed = "1"             # 0=Slow, 1=Med, 2=Fast
+        self.rgb_brightness = 3          # 0-3
 
         self.load_saved_configs()
 
@@ -472,14 +473,12 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         group_gpu.set_description("Atur peran grafis antara AMD Vega iGPU dan NVIDIA GTX 1660 Ti dGPU")
         self.page_power.add(group_gpu)
 
-        # GPU Telemetry Row
         self.row_gpu_telemetry = Adw.ActionRow()
         self.row_gpu_telemetry.set_title("Status GPU NVIDIA GTX 1660 Ti")
         self.row_gpu_telemetry.set_subtitle("Memuat telemetri...")
         self.row_gpu_telemetry.set_icon_name("lucide-monitor")
         group_gpu.add(self.row_gpu_telemetry)
 
-        # GPU Switcher Row
         self.row_gpu_mode = Adw.ActionRow()
         self.row_gpu_mode.set_title("Pilihan Mode Grafis")
         self.row_gpu_mode.set_subtitle("Mode: Hybrid (On-Demand)")
@@ -506,52 +505,61 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.row_gpu_mode.add_suffix(box_gpu_btns)
         group_gpu.add(self.row_gpu_mode)
 
-        # GPU Helper Info Row
         row_gpu_hint = Adw.ActionRow()
         row_gpu_hint.set_title("Peluncur Game / App Khusus NVIDIA")
         row_gpu_hint.set_subtitle("__NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia %command%")
         row_gpu_hint.set_icon_name("lucide-flame")
         group_gpu.add(row_gpu_hint)
 
-        # ── Group 3: Mode Performa CPU ───────────────────────────
+        # ── Group 3: Mode Performa CPU (Harmonized State-Aware Buttons) ───
         group_modes = Adw.PreferencesGroup()
         group_modes.set_title("Kontrol Mode Performa & Daya")
-        group_modes.set_description("Pilih profil performa prosesor sesuai kebutuhan kerja Anda")
+        group_modes.set_description("Pilih profil performa prosesor (Biru = Aktif, Abu-abu = Pilihan)")
         self.page_power.add(group_modes)
 
+        # Mode Powersave Row
         row_ps = Adw.ActionRow()
         row_ps.set_title("Mode Hemat Daya (Powersave)")
         row_ps.set_subtitle("CPU dibatasi 1.7–2.5 GHz, Turbo OFF, Profil Quiet")
         row_ps.set_icon_name("lucide-leaf")
-        btn_ps = Gtk.Button(label="Aktifkan")
-        btn_ps.add_css_class("suggested-action")
-        btn_ps.set_valign(Gtk.Align.CENTER)
-        btn_ps.connect("clicked", lambda b: self.set_mode("powersave"))
-        row_ps.add_suffix(btn_ps)
+        row_ps.set_activatable(True)
+        row_ps.connect("activated", lambda r: self.set_mode("powersave"))
+
+        self.btn_mode_ps = Gtk.Button(label="Aktifkan")
+        self.btn_mode_ps.set_valign(Gtk.Align.CENTER)
+        self.btn_mode_ps.connect("clicked", lambda b: self.set_mode("powersave"))
+        row_ps.add_suffix(self.btn_mode_ps)
         group_modes.add(row_ps)
 
+        # Mode Performance Row
         row_perf = Adw.ActionRow()
         row_perf.set_title("Mode Performa Penuh (Performance)")
         row_perf.set_subtitle("CPU Maksimal 4.3 GHz, Turbo ON, Profil Performance")
         row_perf.set_icon_name("lucide-flame")
-        btn_perf = Gtk.Button(label="Aktifkan")
-        btn_perf.add_css_class("destructive-action")
-        btn_perf.set_valign(Gtk.Align.CENTER)
-        btn_perf.connect("clicked", lambda b: self.set_mode("performance"))
-        row_perf.add_suffix(btn_perf)
+        row_perf.set_activatable(True)
+        row_perf.connect("activated", lambda r: self.set_mode("performance"))
+
+        self.btn_mode_perf = Gtk.Button(label="Aktifkan")
+        self.btn_mode_perf.set_valign(Gtk.Align.CENTER)
+        self.btn_mode_perf.connect("clicked", lambda b: self.set_mode("performance"))
+        row_perf.add_suffix(self.btn_mode_perf)
         group_modes.add(row_perf)
 
+        # Mode Auto Row
         row_auto = Adw.ActionRow()
         row_auto.set_title("Mode Otomatis (Auto-Switch)")
         row_auto.set_subtitle("Performa saat colok charger, Hemat saat baterai")
         row_auto.set_icon_name("lucide-refresh-cw")
-        btn_auto = Gtk.Button(label="Terapkan")
-        btn_auto.set_valign(Gtk.Align.CENTER)
-        btn_auto.connect("clicked", lambda b: self.set_mode("auto"))
-        row_auto.add_suffix(btn_auto)
+        row_auto.set_activatable(True)
+        row_auto.connect("activated", lambda r: self.set_mode("auto"))
+
+        self.btn_mode_auto = Gtk.Button(label="Aktifkan")
+        self.btn_mode_auto.set_valign(Gtk.Align.CENTER)
+        self.btn_mode_auto.connect("clicked", lambda b: self.set_mode("auto"))
+        row_auto.add_suffix(self.btn_mode_auto)
         group_modes.add(row_auto)
 
-        # ── Group 4: Kontrol Kipas ───────────────────────────────
+        # ── Group 4: Kontrol Kipas (Harmonized State-Aware Buttons) ────────
         group_fan = Adw.PreferencesGroup()
         group_fan.set_title("Kontrol Kipas & Pendingin (Dual Fan)")
         self.page_power.add(group_fan)
@@ -574,11 +582,9 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.btn_fan_silent.connect("clicked", lambda b: self.set_fan("2"))
 
         self.btn_fan_normal = Gtk.Button(label="Normal")
-        self.btn_fan_normal.add_css_class("suggested-action")
         self.btn_fan_normal.connect("clicked", lambda b: self.set_fan("0"))
 
         self.btn_fan_turbo = Gtk.Button(label="Turbo")
-        self.btn_fan_turbo.add_css_class("destructive-action")
         self.btn_fan_turbo.connect("clicked", lambda b: self.set_fan("1"))
 
         box_fan_btns.append(self.btn_fan_silent)
@@ -773,7 +779,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             row_eff.set_title(m_title)
             row_eff.set_subtitle(m_sub)
             row_eff.set_icon_name(m_icon)
-            btn_eff = Gtk.Button(label="Terapkan")
+            btn_eff = Gtk.Button(label="Pilih")
             btn_eff.set_valign(Gtk.Align.CENTER)
             btn_eff.connect("clicked", lambda w, mode=m_id: self.select_rgb_mode(mode))
             self.effect_buttons[m_id] = btn_eff
@@ -797,8 +803,6 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.bright_buttons = {}
         for b_val, b_lbl in [(0, "Mati"), (1, "Redup"), (2, "Sedang"), (3, "Terang")]:
             btn = Gtk.Button(label=b_lbl)
-            if b_val == self.rgb_brightness:
-                btn.add_css_class("suggested-action")
             btn.connect("clicked", lambda w, v=b_val: self.set_rgb_brightness_level(v))
             self.bright_buttons[b_val] = btn
             box_bright_btns.append(btn)
@@ -815,8 +819,6 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.speed_buttons = {}
         for s_val, s_lbl in [("0", "Lambat"), ("1", "Sedang"), ("2", "Cepat")]:
             btn = Gtk.Button(label=s_lbl)
-            if s_val == self.rgb_speed:
-                btn.add_css_class("suggested-action")
             btn.connect("clicked", lambda w, sp=s_val, sl=s_lbl: self.select_rgb_speed(sp, sl))
             self.speed_buttons[s_val] = btn
             box_speed_btns.append(btn)
@@ -1007,6 +1009,17 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             except Exception:
                 pass
 
+        # 3. CPU Power Mode Config
+        pwr_conf = "/etc/asus-power-manager/power_mode.conf"
+        if os.path.exists(pwr_conf):
+            try:
+                with open(pwr_conf) as f:
+                    for line in f:
+                        if line.startswith("POWER_MODE="):
+                            self.current_power_mode = line.strip().split("=", 1)[1]
+            except Exception:
+                pass
+
     def update_preview_box_color(self):
         hex_color = f"#{self.rgb_r:02x}{self.rgb_g:02x}{self.rgb_b:02x}"
         if hasattr(self, 'preview_area'):
@@ -1019,8 +1032,10 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         for m_id, btn in self.effect_buttons.items():
             if m_id == self.rgb_mode:
                 btn.add_css_class("suggested-action")
+                btn.set_label("✓ Aktif")
             else:
                 btn.remove_css_class("suggested-action")
+                btn.set_label("Pilih")
 
     def auto_refresh_tick(self):
         self.update_status()
@@ -1114,7 +1129,10 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             # 4. Update GPU Telemetry & Mode Buttons
             self.update_gpu_telemetry()
 
-            # 5. Fan Monitor & Status
+            # 5. Update CPU Mode Buttons (Harmonized Blue/Gray)
+            self.update_power_mode_buttons()
+
+            # 6. Fan Monitor & Status (Harmonized Blue/Gray)
             fan1_rpm = "--"
             fan2_rpm = "--"
             for f1 in glob.glob("/sys/devices/platform/asus-nb-wmi/hwmon/hwmon*/fan1_input"):
@@ -1139,14 +1157,17 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
                 fan_mode_label = "Silent / Hening (Kecepatan Rendah)"
             self.row_fan_ctrl.set_subtitle(f"Status Aktif: {fan_mode_label}")
 
+            # Harmonize fan buttons: active is suggested-action (blue), inactive is neutral gray
             self.btn_fan_silent.remove_css_class("suggested-action")
             self.btn_fan_normal.remove_css_class("suggested-action")
             self.btn_fan_turbo.remove_css_class("suggested-action")
+            self.btn_fan_turbo.remove_css_class("destructive-action")
+            
             if fan_policy == "2": self.btn_fan_silent.add_css_class("suggested-action")
             elif fan_policy == "1": self.btn_fan_turbo.add_css_class("suggested-action")
             else: self.btn_fan_normal.add_css_class("suggested-action")
 
-            # 6. CPU Info
+            # 7. CPU Info
             gov = ""
             freq_khz = ""
             boost = ""
@@ -1169,7 +1190,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
 
             self.row_cpu.set_subtitle(f"Governor: {gov.upper()} @ {freq_mhz} MHz | Turbo: {boost} | Profil: {profile}")
 
-            # 7. Update Systemd Services Tab
+            # 8. Update Systemd Services Tab
             self.update_services_status()
 
         except Exception:
@@ -1177,8 +1198,32 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         finally:
             self._updating = False
 
+    def update_power_mode_buttons(self):
+        # Reset all 3 buttons to neutral gray
+        self.btn_mode_ps.remove_css_class("suggested-action")
+        self.btn_mode_ps.remove_css_class("destructive-action")
+        self.btn_mode_ps.set_label("Pilih")
+
+        self.btn_mode_perf.remove_css_class("suggested-action")
+        self.btn_mode_perf.remove_css_class("destructive-action")
+        self.btn_mode_perf.set_label("Pilih")
+
+        self.btn_mode_auto.remove_css_class("suggested-action")
+        self.btn_mode_auto.remove_css_class("destructive-action")
+        self.btn_mode_auto.set_label("Pilih")
+
+        # Highlight currently active mode in blue (suggested-action)
+        if self.current_power_mode == "powersave":
+            self.btn_mode_ps.add_css_class("suggested-action")
+            self.btn_mode_ps.set_label("✓ Aktif")
+        elif self.current_power_mode == "performance":
+            self.btn_mode_perf.add_css_class("suggested-action")
+            self.btn_mode_perf.set_label("✓ Aktif")
+        else:
+            self.btn_mode_auto.add_css_class("suggested-action")
+            self.btn_mode_auto.set_label("✓ Aktif")
+
     def update_gpu_telemetry(self):
-        # Read live NVIDIA telemetry
         gpu_temp = "--"
         gpu_pwr = "--"
         gpu_vram = "--"
@@ -1211,7 +1256,6 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
 
         self.row_gpu_telemetry.set_subtitle(f"Suhu: {gpu_temp} • Daya: {gpu_pwr} • VRAM: {gpu_vram} • P-State: {gpu_pstate} ({pci_status})")
 
-        # Update GPU mode button styles
         self.btn_gpu_hybrid.remove_css_class("suggested-action")
         self.btn_gpu_amd.remove_css_class("suggested-action")
         self.btn_gpu_nvidia.remove_css_class("suggested-action")
@@ -1327,6 +1371,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             self.show_toast(f"Gagal mengubah mode kipas: {e}")
 
     def set_mode(self, mode):
+        self.current_power_mode = mode
         cmd = []
         msg = ""
         if mode == "powersave":
@@ -1338,6 +1383,15 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         elif mode == "auto":
             cmd = ["sudo", "-n", get_script_path("battery-udev-handler.sh")]
             msg = "⚡ Mode Otomatis Berhasil Diterapkan!"
+
+        # Persist power mode
+        try:
+            conf_dir = "/etc/asus-power-manager"
+            os.makedirs(conf_dir, exist_ok=True)
+            with open(f"{conf_dir}/power_mode.conf", "w") as f:
+                f.write("POWER_MODE=" + str(mode) + "\n")
+        except Exception:
+            pass
 
         try:
             subprocess.run(cmd, check=True)
