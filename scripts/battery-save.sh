@@ -74,10 +74,8 @@ done
 log "CPU max freq → $((MAX_FREQ / 1000)) MHz"
 
 # Disable turbo boost
-if [[ -f /sys/devices/system/cpu/cpufreq/boost ]]; then
-    echo "0" > /sys/devices/system/cpu/cpufreq/boost
-    log "Turbo boost → disabled"
-fi
+for b in /sys/devices/system/cpu/cpufreq/boost /sys/devices/system/cpu/amd_pstate/cpb /sys/devices/system/cpu/cpu*/cpufreq/boost /sys/devices/system/cpu/cpufreq/policy*/boost; do [ -f "$b" ] && echo "0" > "$b" 2>/dev/null || true; done
+log "Turbo boost → disabled"
 
 # Set min frequency to lowest
 for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_min_freq; do
@@ -229,9 +227,7 @@ fi
 # ─────────────────────────────────────────────
 # 10. USB Autosuspend
 # ─────────────────────────────────────────────
-for usb_dev in /sys/bus/usb/devices/*/power/control; do
-    echo "auto" > "$usb_dev" 2>/dev/null || true
-done
+for usb_dev in /sys/bus/usb/devices/*/power/control; do [ -f "$(dirname $usb_dev)/idVendor" ] && [ "$(cat $(dirname $usb_dev)/idVendor 2>/dev/null)" = "046d" ] && continue; echo "auto" > "$usb_dev" 2>/dev/null || true; done
 
 for usb_dev in /sys/bus/usb/devices/*/power/autosuspend; do
     echo "2" > "$usb_dev" 2>/dev/null || true  # 2 seconds

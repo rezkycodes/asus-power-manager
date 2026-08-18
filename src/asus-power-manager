@@ -389,6 +389,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.set_title("Tweaks ASUS TUF")
+        self.set_icon_name("com.rezkycodes.BatteryManager")
         self.set_default_size(560, 820)
 
         # Internal state & guards
@@ -396,14 +397,14 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self._rgb_slider_updating = False
         self._debounce_timer_id = None
         
-        self.current_power_mode = "auto" # powersave | performance | auto
-        self.gpu_mode = "hybrid"         # hybrid | integrated | dedicated
-        self.rgb_mode = "0"              # 0=Static, 1=Breathing, 2=Cycle, 3=Strobe, 10=Pulse
+        self.current_power_mode = "powersave" # powersave | performance | auto
+        self.gpu_mode = "hybrid"               # hybrid | integrated | dedicated
+        self.rgb_mode = "0"                    # 0=Static, 1=Breathing, 2=Cycle, 3=Strobe, 10=Pulse
         self.rgb_r = 0
         self.rgb_g = 200
         self.rgb_b = 255
-        self.rgb_speed = "1"             # 0=Slow, 1=Med, 2=Fast
-        self.rgb_brightness = 3          # 0-3
+        self.rgb_speed = "1"                   # 0=Slow, 1=Med, 2=Fast
+        self.rgb_brightness = 3                # 0-3
 
         self.load_saved_configs()
 
@@ -525,7 +526,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         row_ps.set_activatable(True)
         row_ps.connect("activated", lambda r: self.set_mode("powersave"))
 
-        self.btn_mode_ps = Gtk.Button(label="Aktifkan")
+        self.btn_mode_ps = Gtk.Button(label="Pilih")
         self.btn_mode_ps.set_valign(Gtk.Align.CENTER)
         self.btn_mode_ps.connect("clicked", lambda b: self.set_mode("powersave"))
         row_ps.add_suffix(self.btn_mode_ps)
@@ -539,7 +540,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         row_perf.set_activatable(True)
         row_perf.connect("activated", lambda r: self.set_mode("performance"))
 
-        self.btn_mode_perf = Gtk.Button(label="Aktifkan")
+        self.btn_mode_perf = Gtk.Button(label="Pilih")
         self.btn_mode_perf.set_valign(Gtk.Align.CENTER)
         self.btn_mode_perf.connect("clicked", lambda b: self.set_mode("performance"))
         row_perf.add_suffix(self.btn_mode_perf)
@@ -553,7 +554,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         row_auto.set_activatable(True)
         row_auto.connect("activated", lambda r: self.set_mode("auto"))
 
-        self.btn_mode_auto = Gtk.Button(label="Aktifkan")
+        self.btn_mode_auto = Gtk.Button(label="Pilih")
         self.btn_mode_auto.set_valign(Gtk.Align.CENTER)
         self.btn_mode_auto.connect("clicked", lambda b: self.set_mode("auto"))
         row_auto.add_suffix(self.btn_mode_auto)
@@ -803,6 +804,8 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.bright_buttons = {}
         for b_val, b_lbl in [(0, "Mati"), (1, "Redup"), (2, "Sedang"), (3, "Terang")]:
             btn = Gtk.Button(label=b_lbl)
+            if b_val == self.rgb_brightness:
+                btn.add_css_class("suggested-action")
             btn.connect("clicked", lambda w, v=b_val: self.set_rgb_brightness_level(v))
             self.bright_buttons[b_val] = btn
             box_bright_btns.append(btn)
@@ -819,6 +822,8 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.speed_buttons = {}
         for s_val, s_lbl in [("0", "Lambat"), ("1", "Sedang"), ("2", "Cepat")]:
             btn = Gtk.Button(label=s_lbl)
+            if s_val == self.rgb_speed:
+                btn.add_css_class("suggested-action")
             btn.connect("clicked", lambda w, sp=s_val, sl=s_lbl: self.select_rgb_speed(sp, sl))
             self.speed_buttons[s_val] = btn
             box_speed_btns.append(btn)
@@ -1161,26 +1166,33 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             self.btn_fan_silent.remove_css_class("suggested-action")
             self.btn_fan_normal.remove_css_class("suggested-action")
             self.btn_fan_turbo.remove_css_class("suggested-action")
-            self.btn_fan_turbo.remove_css_class("destructive-action")
-            
             if fan_policy == "2": self.btn_fan_silent.add_css_class("suggested-action")
             elif fan_policy == "1": self.btn_fan_turbo.add_css_class("suggested-action")
             else: self.btn_fan_normal.add_css_class("suggested-action")
 
-            # 7. CPU Info
+            # 7. CPU Info & Boost Status Detection
             gov = ""
             freq_khz = ""
-            boost = ""
+            boost = "Nonaktif"
+            
             if os.path.exists("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"):
                 with open("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor") as f:
                     gov = f.read().strip()
             if os.path.exists("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq"):
                 with open("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq") as f:
                     freq_khz = f.read().strip()
-            if os.path.exists("/sys/devices/system/cpu/cpufreq/boost"):
-                with open("/sys/devices/system/cpu/cpufreq/boost") as f:
-                    boost = "Aktif" if f.read().strip() == "1" else "Nonaktif"
-            
+
+            for b_path in ["/sys/devices/system/cpu/cpufreq/boost", "/sys/devices/system/cpu/amd_pstate/cpb", "/sys/devices/system/cpu/cpu0/cpufreq/boost"]:
+                if os.path.exists(b_path):
+                    try:
+                        with open(b_path) as f:
+                            val = f.read().strip()
+                            if val == "1":
+                                boost = "Aktif"
+                                break
+                    except Exception:
+                        pass
+
             freq_mhz = int(freq_khz) // 1000 if freq_khz.isdigit() else 0
             
             profile = ""
@@ -1199,17 +1211,32 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             self._updating = False
 
     def update_power_mode_buttons(self):
+        # Determine actual CPU power state if not explicitly saved
+        try:
+            gov = ""
+            boost_val = "1"
+            if os.path.exists("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"):
+                with open("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor") as f:
+                    gov = f.read().strip().lower()
+            if os.path.exists("/sys/devices/system/cpu/cpufreq/boost"):
+                with open("/sys/devices/system/cpu/cpufreq/boost") as f:
+                    boost_val = f.read().strip()
+
+            if gov == "powersave" and boost_val == "0":
+                self.current_power_mode = "powersave"
+            elif gov == "performance" and boost_val == "1":
+                self.current_power_mode = "performance"
+        except Exception:
+            pass
+
         # Reset all 3 buttons to neutral gray
         self.btn_mode_ps.remove_css_class("suggested-action")
-        self.btn_mode_ps.remove_css_class("destructive-action")
         self.btn_mode_ps.set_label("Pilih")
 
         self.btn_mode_perf.remove_css_class("suggested-action")
-        self.btn_mode_perf.remove_css_class("destructive-action")
         self.btn_mode_perf.set_label("Pilih")
 
         self.btn_mode_auto.remove_css_class("suggested-action")
-        self.btn_mode_auto.remove_css_class("destructive-action")
         self.btn_mode_auto.set_label("Pilih")
 
         # Highlight currently active mode in blue (suggested-action)
