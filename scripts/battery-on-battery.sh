@@ -13,7 +13,7 @@ echo "$(date) → Battery save mode" >> "$LOG"
 
 # 2. CPU
 for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo "powersave" > "$cpu" 2>/dev/null; done
-for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq; do echo "2500000" > "$cpu" 2>/dev/null; done
+for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq; do echo "2900000" > "$cpu" 2>/dev/null; done
 for b in /sys/devices/system/cpu/cpufreq/boost /sys/devices/system/cpu/amd_pstate/cpb /sys/devices/system/cpu/cpu*/cpufreq/boost /sys/devices/system/cpu/cpufreq/policy*/boost; do [ -f "$b" ] && echo "0" > "$b" 2>/dev/null || true; done
 
 # 3. ASUS platform

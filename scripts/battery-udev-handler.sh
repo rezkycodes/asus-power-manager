@@ -57,7 +57,7 @@ else
 
     # Battery save mode
     for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo "powersave" > "$cpu" 2>/dev/null; done
-    for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq; do echo "2500000" > "$cpu" 2>/dev/null; done
+    for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq; do echo "2900000" > "$cpu" 2>/dev/null; done
     for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_min_freq; do echo "1400000" > "$cpu" 2>/dev/null; done
     [[ -f /sys/devices/system/cpu/cpufreq/boost ]] && echo "0" > /sys/devices/system/cpu/cpufreq/boost
     for cpu in /sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference; do echo "power" > "$cpu" 2>/dev/null; done

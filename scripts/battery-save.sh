@@ -61,10 +61,10 @@ fi
 # Ryzen 7 4800H: 1.4 GHz base, 4.3 GHz boost
 # Battery mode: cap at 2.0 GHz (aggressive) or 2.5 GHz (normal)
 if $AGGRESSIVE; then
-    MAX_FREQ="2000000"  # 2.0 GHz
+    MAX_FREQ="2900000"  # 2.0 GHz
     info "Aggressive mode: capping CPU at 2.0 GHz"
 else
-    MAX_FREQ="2500000"  # 2.5 GHz
+    MAX_FREQ="2900000"  # 2.5 GHz
     info "Normal mode: capping CPU at 2.5 GHz"
 fi
 
