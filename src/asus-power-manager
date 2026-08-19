@@ -6,6 +6,7 @@ import glob
 import math
 import threading
 import time
+from collections import deque
 import gi
 
 gi.require_version('Gtk', '4.0')
@@ -101,6 +102,13 @@ def apply_custom_css():
         background-color: alpha(currentColor, 0.04);
         border-radius: 10px;
         padding: 12px;
+    }
+
+    /* CPU realtime graph frames (Mission Center style) */
+    .cpu-graph-frame {
+        border: 1px solid rgba(41, 128, 236, 0.55);
+        border-radius: 6px;
+        background-color: rgba(41, 128, 236, 0.06);
     }
 
     /* RGB Sliders Color Styling */
@@ -460,6 +468,122 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.toast_overlay = Adw.ToastOverlay()
         self.toast_overlay.set_child(self.stack)
         self.toolbar_view.set_content(self.toast_overlay)
+
+        # ══════════════════════════════════════════════════════════
+        # TAB 0: CPU (Mission Center style) — FIRST TAB
+        # ══════════════════════════════════════════════════════════
+        self._cpu_logical = os.cpu_count() or 1
+        self._cpu_hist = [deque([0.0] * 60, maxlen=60) for _ in range(self._cpu_logical)]
+        self._cpu_overall_hist = deque([0.0] * 60, maxlen=60)
+        self._cpu_temp_hist = deque([0.0] * 60, maxlen=60)
+        self._cpu_prev_stat = None
+        self._cpu_temp_path = None
+        self._cpu_info = {}
+        self.cpu_lbl = {}
+
+        self.page_cpu = Adw.PreferencesPage()
+        stack_cpu = self.stack.add_titled(self.page_cpu, "cpu", "CPU")
+        stack_cpu.set_icon_name("lucide-cpu")
+
+        # Header: model + overall utilization + speed
+        group_cpu_head = Adw.PreferencesGroup()
+        group_cpu_head.set_title("Prosesor")
+        self.page_cpu.add(group_cpu_head)
+
+        self.row_cpu_model = Adw.ActionRow()
+        self.row_cpu_model.set_title("Memuat model CPU...")
+        self.row_cpu_model.set_subtitle("Utilisasi: --% • Kecepatan: -- GHz")
+        self.row_cpu_model.set_icon_name("lucide-cpu")
+        self.cpu_util_bar = Gtk.LevelBar()
+        self.cpu_util_bar.set_min_value(0.0)
+        self.cpu_util_bar.set_max_value(100.0)
+        self.cpu_util_bar.set_value(0.0)
+        self.cpu_util_bar.set_size_request(110, 16)
+        self.cpu_util_bar.set_valign(Gtk.Align.CENTER)
+        self.row_cpu_model.add_suffix(self.cpu_util_bar)
+        group_cpu_head.add(self.row_cpu_model)
+
+        # Per-core realtime usage graphs (grid)
+        group_cpu_cores = Adw.PreferencesGroup()
+        group_cpu_cores.set_title("Utilisasi per-Core (1 menit)")
+        group_cpu_cores.set_description("Grafik realtime penggunaan tiap core logis (0–100%)")
+        self.page_cpu.add(group_cpu_cores)
+
+        cores_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        cores_card.add_css_class("swatches-card")
+        cores_grid = Gtk.Grid()
+        cores_grid.set_row_spacing(8)
+        cores_grid.set_column_spacing(8)
+        cores_grid.set_column_homogeneous(True)
+        cols = 4 if self._cpu_logical >= 8 else 2
+        self.cpu_core_areas = []
+        for i in range(self._cpu_logical):
+            area = Gtk.DrawingArea()
+            area.set_content_width(110)
+            area.set_content_height(58)
+            area.set_hexpand(True)
+            area.set_draw_func(self._draw_core_graph, i)
+            frame = Gtk.Frame()
+            frame.add_css_class("cpu-graph-frame")
+            frame.set_child(area)
+            cores_grid.attach(frame, i % cols, i // cols, 1, 1)
+            self.cpu_core_areas.append(area)
+        cores_card.append(cores_grid)
+        row_cores = Adw.PreferencesRow()
+        row_cores.set_activatable(False)
+        row_cores.set_child(cores_card)
+        group_cpu_cores.add(row_cores)
+
+        # Temperature realtime area graph
+        group_cpu_temp = Adw.PreferencesGroup()
+        group_cpu_temp.set_title("Suhu CPU (1 menit)")
+        self.page_cpu.add(group_cpu_temp)
+
+        temp_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        temp_card.add_css_class("swatches-card")
+        temp_frame = Gtk.Frame()
+        temp_frame.add_css_class("cpu-graph-frame")
+        self.cpu_temp_area = Gtk.DrawingArea()
+        self.cpu_temp_area.set_content_height(140)
+        self.cpu_temp_area.set_hexpand(True)
+        self.cpu_temp_area.set_draw_func(self._draw_temp_graph)
+        temp_frame.set_child(self.cpu_temp_area)
+        temp_card.append(temp_frame)
+        row_temp = Adw.PreferencesRow()
+        row_temp.set_activatable(False)
+        row_temp.set_child(temp_card)
+        group_cpu_temp.add(row_temp)
+
+        # Detailed info rows
+        group_cpu_info = Adw.PreferencesGroup()
+        group_cpu_info.set_title("Informasi Detail")
+        self.page_cpu.add(group_cpu_info)
+
+        def _mk_info(title, icon, key):
+            row = Adw.ActionRow()
+            row.set_title(title)
+            row.set_icon_name(icon)
+            lbl = Gtk.Label(label="--")
+            lbl.add_css_class("dim-label")
+            lbl.set_valign(Gtk.Align.CENTER)
+            row.add_suffix(lbl)
+            self.cpu_lbl[key] = lbl
+            group_cpu_info.add(row)
+
+        _mk_info("Kecepatan Saat Ini", "lucide-gauge", "speed")
+        _mk_info("Base Speed", "lucide-gauge", "base")
+        _mk_info("Prosesor Logis", "lucide-cpu", "logical")
+        _mk_info("Socket", "lucide-box", "sockets")
+        _mk_info("Virtualisasi", "lucide-server", "virt")
+        _mk_info("Virtual Machine", "lucide-monitor", "vm")
+        _mk_info("Cache L1 (data / instruksi)", "lucide-database", "l1")
+        _mk_info("Cache L2", "lucide-database", "l2")
+        _mk_info("Cache L3", "lucide-database", "l3")
+        _mk_info("Cpufreq Driver", "lucide-sliders", "driver")
+        _mk_info("Cpufreq Governor", "lucide-sliders", "governor")
+        _mk_info("Proses / Thread / Handle", "lucide-activity", "pth")
+        _mk_info("Uptime Sistem", "lucide-refresh-cw", "uptime")
+        _mk_info("Suhu CPU", "lucide-flame", "temp")
 
         # ══════════════════════════════════════════════════════════
         # TAB 1: DAYA, BATERAI & GPU
@@ -1077,8 +1201,8 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         row_m_usbalways.add_suffix(lbl_m_usb)
         group_m_memory.add(row_m_usbalways)
 
-        # Explicitly make "power" tab visible on startup
-        self.stack.set_visible_child_name("power")
+        # Explicitly make "CPU" tab visible on startup (first tab)
+        self.stack.set_visible_child_name("cpu")
 
         # Start background poller for slow subprocesses (upower, nvidia-smi,
         # solaar, systemctl). The daemon thread runs its first poll immediately
@@ -1088,11 +1212,17 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self._poller.start()
         self._mouse_writer_thread = threading.Thread(target=self._mouse_writer, daemon=True)
         self._mouse_writer_thread.start()
+        # CPU sampler: reads /proc/stat, cpufreq, hwmon, /proc counts every 1s
+        # off the UI thread into ring buffers; UI only draws from them.
+        self._cpu_sampler_thread = threading.Thread(target=self._cpu_sampler, daemon=True)
+        self._cpu_sampler_thread.start()
         self.connect("close-request", self._on_close)
 
         # Initial Update & 3s Loop
         self.update_status()
         GLib.timeout_add_seconds(3, self.auto_refresh_tick)
+        # CPU graphs/labels refresh at 1s for smooth realtime rendering
+        GLib.timeout_add_seconds(1, self._cpu_ui_tick)
 
     # ── Mouse Handlers ─────────────────────────────────────────
     def set_mouse_hz(self, hz_val, ms_val):
@@ -1378,6 +1508,277 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self._poll_wake.set()
         self._mouse_write_event.set()
         return False
+
+    # ── CPU tab: realtime graphs + sampler ─────────────────────
+    def _draw_line_graph(self, cr, w, h, data, max_val=100.0, fill=True):
+        # Faint horizontal gridlines
+        cr.set_line_width(1.0)
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.06)
+        for frac in (0.25, 0.5, 0.75):
+            y = h * frac
+            cr.move_to(0, y)
+            cr.line_to(w, y)
+            cr.stroke()
+
+        pts = list(data)
+        n = len(pts)
+        if n < 2 or max_val <= 0:
+            return
+        stepx = w / (n - 1)
+
+        def yv(v):
+            v = 0.0 if v < 0 else (max_val if v > max_val else v)
+            return h - (v / max_val) * (h - 2.0) - 1.0
+
+        cr.set_line_width(1.6)
+        cr.set_source_rgb(0.16, 0.55, 0.96)  # accent blue
+        for i, v in enumerate(pts):
+            x = i * stepx
+            y = yv(v)
+            if i == 0:
+                cr.move_to(x, y)
+            else:
+                cr.line_to(x, y)
+        if fill:
+            cr.stroke_preserve()
+            cr.line_to(w, h)
+            cr.line_to(0, h)
+            cr.close_path()
+            cr.set_source_rgba(0.16, 0.55, 0.96, 0.22)
+            cr.fill()
+        else:
+            cr.stroke()
+
+    def _draw_core_graph(self, area, cr, width, height, core_idx):
+        try:
+            self._draw_line_graph(cr, width, height, self._cpu_hist[core_idx], 100.0, fill=True)
+        except Exception:
+            pass
+
+    def _draw_temp_graph(self, area, cr, width, height):
+        try:
+            self._draw_line_graph(cr, width, height, self._cpu_temp_hist, 100.0, fill=True)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _fmt_uptime(secs):
+        secs = int(secs)
+        d = secs // 86400
+        h = (secs % 86400) // 3600
+        m = (secs % 3600) // 60
+        s = secs % 60
+        return f"{d:02d}:{h:02d}:{m:02d}:{s:02d}"
+
+    def _gather_cpu_static(self):
+        info = self._cpu_info
+        try:
+            with open("/proc/cpuinfo") as f:
+                for line in f:
+                    if line.lower().startswith("model name"):
+                        info["model"] = line.split(":", 1)[1].strip()
+                        break
+        except Exception:
+            pass
+        info["logical"] = str(self._cpu_logical)
+
+        base = None
+        for p in ("/sys/devices/system/cpu/cpu0/cpufreq/base_frequency",
+                  "/sys/devices/system/cpu/cpu0/cpufreq/bios_limit"):
+            try:
+                with open(p) as f:
+                    base = int(f.read().strip())
+                    break
+            except Exception:
+                pass
+        if base:
+            info["base_ghz"] = f"{base / 1e6:.2f}"
+
+        try:
+            out = subprocess.check_output(["lscpu"], text=True, timeout=4)
+            d = {}
+            for line in out.splitlines():
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    d[k.strip()] = v.strip()
+            if not info.get("model"):
+                info["model"] = d.get("Model name", "CPU")
+            info["sockets"] = d.get("Socket(s)", "1")
+            info["virt"] = d.get("Virtualization", d.get("Virtualization type", "—")) or "—"
+            info["vm"] = "Ya" if d.get("Hypervisor vendor") else "Tidak"
+            info["l1d"] = d.get("L1d cache", "—")
+            info["l1i"] = d.get("L1i cache", "—")
+            info["l2"] = d.get("L2 cache", "—")
+            info["l3"] = d.get("L3 cache", "—")
+        except Exception:
+            pass
+
+        try:
+            for hp in glob.glob("/sys/class/hwmon/hwmon*"):
+                try:
+                    with open(os.path.join(hp, "name")) as f:
+                        nm = f.read().strip()
+                except Exception:
+                    continue
+                if nm in ("k10temp", "coretemp", "zenpower"):
+                    cand = os.path.join(hp, "temp1_input")
+                    if os.path.exists(cand):
+                        self._cpu_temp_path = cand
+                        break
+        except Exception:
+            pass
+
+    def _sample_cpu(self, tick):
+        # /proc/stat -> overall + per-core utilization via deltas
+        idle_tot = {}
+        total_tot = {}
+        try:
+            with open("/proc/stat") as f:
+                for line in f:
+                    if not line.startswith("cpu"):
+                        continue
+                    parts = line.split()
+                    key = parts[0]
+                    if key == "cpu":
+                        idx = -1
+                    elif key[3:].isdigit():
+                        idx = int(key[3:])
+                    else:
+                        continue
+                    vals = list(map(int, parts[1:]))
+                    idle = vals[3] + (vals[4] if len(vals) > 4 else 0)
+                    idle_tot[idx] = idle
+                    total_tot[idx] = sum(vals)
+        except Exception:
+            return
+
+        prev = self._cpu_prev_stat
+        self._cpu_prev_stat = (idle_tot, total_tot)
+        if prev is not None:
+            pidle, ptotal = prev
+
+            def pct(i):
+                dt = total_tot.get(i, 0) - ptotal.get(i, 0)
+                di = idle_tot.get(i, 0) - pidle.get(i, 0)
+                if dt <= 0:
+                    return 0.0
+                return max(0.0, min(100.0, (1.0 - di / dt) * 100.0))
+
+            self._cpu_overall_hist.append(pct(-1))
+            for i in range(self._cpu_logical):
+                self._cpu_hist[i].append(pct(i))
+            self._cpu_info["overall"] = round(pct(-1))
+
+        # Speed (avg of per-core current freq)
+        freqs = []
+        for i in range(self._cpu_logical):
+            try:
+                with open(f"/sys/devices/system/cpu/cpu{i}/cpufreq/scaling_cur_freq") as f:
+                    freqs.append(int(f.read().strip()))
+            except Exception:
+                pass
+        if freqs:
+            self._cpu_info["speed_ghz"] = f"{(sum(freqs) / len(freqs)) / 1e6:.2f}"
+
+        # Temperature
+        if self._cpu_temp_path:
+            try:
+                with open(self._cpu_temp_path) as f:
+                    t = int(f.read().strip()) / 1000.0
+                self._cpu_temp_hist.append(t)
+                self._cpu_info["temp"] = round(t)
+            except Exception:
+                pass
+
+        # Governor / driver (cheap, can change with power mode)
+        for key, fn in (("governor", "scaling_governor"), ("driver", "scaling_driver")):
+            try:
+                with open(f"/sys/devices/system/cpu/cpu0/cpufreq/{fn}") as f:
+                    self._cpu_info[key] = f.read().strip()
+            except Exception:
+                pass
+
+        # Handles (allocated file descriptors) + uptime
+        try:
+            with open("/proc/sys/fs/file-nr") as f:
+                self._cpu_info["handles"] = f.read().split()[0]
+        except Exception:
+            pass
+        try:
+            with open("/proc/uptime") as f:
+                self._cpu_info["uptime"] = self._fmt_uptime(float(f.read().split()[0]))
+        except Exception:
+            pass
+
+        # Processes / threads (heavier scan) — every 3s
+        if tick % 3 == 0:
+            procs = 0
+            threads = 0
+            try:
+                for name in os.listdir("/proc"):
+                    if name.isdigit():
+                        procs += 1
+                        try:
+                            threads += len(os.listdir(f"/proc/{name}/task"))
+                        except Exception:
+                            pass
+                self._cpu_info["processes"] = procs
+                self._cpu_info["threads"] = threads
+            except Exception:
+                pass
+
+    def _cpu_sampler(self):
+        try:
+            self._gather_cpu_static()
+        except Exception:
+            pass
+        tick = 0
+        while not self._poll_stop:
+            try:
+                self._sample_cpu(tick)
+            except Exception:
+                pass
+            tick += 1
+            time.sleep(1.0)
+
+    def _cpu_ui_tick(self):
+        # Only redraw when the CPU tab is visible (saves power when idle 24/7)
+        try:
+            if self.stack.get_visible_child_name() == "cpu":
+                for area in self.cpu_core_areas:
+                    area.queue_draw()
+                self.cpu_temp_area.queue_draw()
+                self._update_cpu_labels()
+        except Exception:
+            pass
+        return True
+
+    def _update_cpu_labels(self):
+        info = self._cpu_info
+        self.row_cpu_model.set_title(info.get("model", "CPU"))
+        ov = info.get("overall", 0)
+        sp = info.get("speed_ghz", "--")
+        self.row_cpu_model.set_subtitle(f"Utilisasi: {ov}% • Kecepatan: {sp} GHz")
+        try:
+            self.cpu_util_bar.set_value(float(ov))
+        except Exception:
+            pass
+        self.cpu_lbl["speed"].set_text(f"{info.get('speed_ghz', '--')} GHz")
+        self.cpu_lbl["base"].set_text(f"{info['base_ghz']} GHz" if info.get("base_ghz") else "—")
+        self.cpu_lbl["logical"].set_text(str(info.get("logical", "--")))
+        self.cpu_lbl["sockets"].set_text(str(info.get("sockets", "--")))
+        self.cpu_lbl["virt"].set_text(info.get("virt", "—"))
+        self.cpu_lbl["vm"].set_text(info.get("vm", "—"))
+        self.cpu_lbl["l1"].set_text(f"{info.get('l1d', '—')} / {info.get('l1i', '—')}")
+        self.cpu_lbl["l2"].set_text(info.get("l2", "—"))
+        self.cpu_lbl["l3"].set_text(info.get("l3", "—"))
+        self.cpu_lbl["driver"].set_text(info.get("driver", "—"))
+        self.cpu_lbl["governor"].set_text(info.get("governor", "—"))
+        self.cpu_lbl["pth"].set_text(
+            f"{info.get('processes', '--')} / {info.get('threads', '--')} / {info.get('handles', '--')}"
+        )
+        self.cpu_lbl["uptime"].set_text(info.get("uptime", "--"))
+        self.cpu_lbl["temp"].set_text(f"{info.get('temp', '--')} °C")
 
     def auto_refresh_tick(self):
         self.update_status()
