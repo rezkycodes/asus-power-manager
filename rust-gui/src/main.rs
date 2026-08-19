@@ -87,6 +87,15 @@ struct GpuInfo {
     mem_hist: VecDeque<f64>, // percent of VRAM
 }
 
+#[derive(Default, Clone)]
+struct FanInfo {
+    label: String, // e.g. "cpu_fan"
+    path: String,  // fanN_input path
+    key: String,   // stable id "hwmonX:fanN"
+    rpm: f64,
+    hist: VecDeque<f64>,
+}
+
 #[derive(Default)]
 struct Shared {
     ready: bool,
@@ -158,6 +167,8 @@ struct Shared {
     drives: Vec<DriveInfo>,
     // ── GPUs (per adapter) ──
     gpus: Vec<GpuInfo>,
+    // ── Fans (per hwmon fan input) ──
+    fans: Vec<FanInfo>,
     // ── Systemd services (key "user:unit"/"sys:unit" -> state) ──
     services: std::collections::HashMap<String, String>,
 }
@@ -952,6 +963,94 @@ fn sample_gpus(sh: &Arc<Mutex<Shared>>, do_nvidia: bool) {
     }
 }
 
+// Enumerate fans from hwmon fanN_input (with fanN_label when present).
+fn enumerate_fans() -> Vec<FanInfo> {
+    let mut fans: Vec<FanInfo> = Vec::new();
+    if let Ok(rd) = fs::read_dir("/sys/class/hwmon") {
+        let mut hmons: Vec<String> = rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.path().to_string_lossy().to_string())
+            .collect();
+        hmons.sort();
+        for h in hmons {
+            let hname = h.rsplit('/').next().unwrap_or("hwmon").to_string();
+            if let Ok(entries) = fs::read_dir(&h) {
+                let mut inputs: Vec<String> = entries
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.file_name().to_string_lossy().to_string())
+                    .filter(|n| n.starts_with("fan") && n.ends_with("_input"))
+                    .collect();
+                inputs.sort();
+                for inp in inputs {
+                    let base = inp.trim_end_matches("_input").to_string();
+                    let path = format!("{h}/{inp}");
+                    let label = fs::read_to_string(format!("{h}/{base}_label"))
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| base.clone());
+                    fans.push(FanInfo {
+                        label,
+                        path,
+                        key: format!("{hname}:{base}"),
+                        hist: VecDeque::from(vec![0.0; HISTORY]),
+                        rpm: 0.0,
+                    });
+                }
+            }
+        }
+    }
+    fans
+}
+
+fn gather_fans_static(sh: &Arc<Mutex<Shared>>) {
+    let f = enumerate_fans();
+    if let Ok(mut s) = sh.lock() {
+        s.fans = f;
+    }
+}
+
+fn fan_signature(fans: &[FanInfo]) -> String {
+    let mut s = String::new();
+    for f in fans {
+        s.push_str(&f.key);
+        s.push(';');
+    }
+    s
+}
+
+fn refresh_fan_list(sh: &Arc<Mutex<Shared>>) {
+    let fresh = enumerate_fans();
+    if let Ok(mut s) = sh.lock() {
+        let mut old: std::collections::HashMap<String, FanInfo> =
+            s.fans.drain(..).map(|f| (f.key.clone(), f)).collect();
+        let mut merged = Vec::with_capacity(fresh.len());
+        for mut f in fresh {
+            if let Some(o) = old.remove(&f.key) {
+                f.hist = o.hist;
+                f.rpm = o.rpm;
+            }
+            merged.push(f);
+        }
+        s.fans = merged;
+    }
+}
+
+// Per-tick fan RPM sampling (cheap sysfs reads).
+fn sample_fans(sh: &Arc<Mutex<Shared>>) {
+    if let Ok(mut s) = sh.lock() {
+        for f in s.fans.iter_mut() {
+            if let Some(rpm) = fs::read_to_string(&f.path).ok().and_then(|s| s.trim().parse::<f64>().ok()) {
+                f.rpm = rpm;
+            }
+            f.hist.push_back(f.rpm.max(0.0));
+            while f.hist.len() > HISTORY {
+                f.hist.pop_front();
+            }
+        }
+    }
+}
+
 fn spawn_sampler(sh: Arc<Mutex<Shared>>) {
     std::thread::spawn(move || {
         let logical = sh.lock().map(|g| g.logical).unwrap_or(1);
@@ -1163,9 +1262,11 @@ fn spawn_sampler(sh: Arc<Mutex<Shared>>) {
             }
             sample_diskstats(&sh);
             sample_gpus(&sh, tick % 3 == 0);
+            sample_fans(&sh);
             if tick % 3 == 0 {
                 refresh_drive_list(&sh);
                 refresh_gpu_list(&sh);
+                refresh_fan_list(&sh);
                 refresh_part_usage(&sh);
             }
             tick += 1;
@@ -1348,6 +1449,7 @@ struct Ui {
     mem_lbl: std::collections::HashMap<&'static str, gtk::Label>,
     drives: RefCell<Vec<DriveUi>>,
     gpus: RefCell<Vec<GpuUi>>,
+    fans: RefCell<Vec<FanUi>>,
     // hotplug rebuild handles
     shared: Arc<Mutex<Shared>>,
     stack: adw::ViewStack,
@@ -1606,11 +1708,24 @@ impl Ui {
         self.mem_area.queue_draw();
         self.swap_area.queue_draw();
 
-        // ── Dynamic tabs (GPUs + drives): rebuild on change, then update ──
-        let sig = format!("{}#{}", gpu_signature(&g.gpus), drive_signature(&g.drives));
+        // ── Dynamic tabs (GPUs + fans + drives): rebuild on change, then update ──
+        let sig = format!(
+            "{}#{}#{}",
+            gpu_signature(&g.gpus),
+            fan_signature(&g.fans),
+            drive_signature(&g.drives)
+        );
         if *self.dyn_sig.borrow() != sig {
-            self.rebuild_dynamic(&g.gpus, &g.drives);
+            self.rebuild_dynamic(&g.gpus, &g.fans, &g.drives);
             *self.dyn_sig.borrow_mut() = sig;
+        }
+        for fu in self.fans.borrow().iter() {
+            if let Some(f) = g.fans.get(fu.idx) {
+                fu.rpm_lbl.set_text(&format!("{:.0} RPM", f.rpm.max(0.0)));
+                let mx = f.hist.iter().cloned().fold(0.0_f64, f64::max);
+                fu.scale_lbl.set_text(&format!("{mx:.0} RPM"));
+                fu.area.queue_draw();
+            }
         }
         for gu in self.gpus.borrow().iter() {
             if let Some(gp) = g.gpus.get(gu.idx) {
@@ -1679,7 +1794,7 @@ impl Ui {
     // Rebuild the dynamic sidebar rows and stack pages (GPUs then drives) after a
     // hotplug/enumeration change. They live between Memory (index 1) and Power,
     // i.e. starting at index 2.
-    fn rebuild_dynamic(&self, gpus: &[GpuInfo], drives: &[DriveInfo]) {
+    fn rebuild_dynamic(&self, gpus: &[GpuInfo], fans: &[FanInfo], drives: &[DriveInfo]) {
         for r in self.dyn_rows.borrow().iter() {
             self.sidebar.remove(r);
         }
@@ -1689,6 +1804,7 @@ impl Ui {
         }
         self.dyn_pages.borrow_mut().clear();
         self.gpus.borrow_mut().clear();
+        self.fans.borrow_mut().clear();
         self.drives.borrow_mut().clear();
 
         let mut pos = 2i32; // after CPU(0), Memory(1)
@@ -1701,6 +1817,16 @@ impl Ui {
             self.dyn_rows.borrow_mut().push(row);
             self.dyn_pages.borrow_mut().push(page);
             self.gpus.borrow_mut().push(gu);
+        }
+        for (i, info) in fans.iter().enumerate() {
+            let (page, fu) = build_fan_page(&self.shared, i, info);
+            self.stack.add_titled(&page, Some(&format!("fan{i}")), &format!("Fan {i}"));
+            let row = sidebar_row(&format!("fan{i}"), &format!("Fan {i} ({})", info.label), "lucide-fan");
+            self.sidebar.insert(&row, pos);
+            pos += 1;
+            self.dyn_rows.borrow_mut().push(row);
+            self.dyn_pages.borrow_mut().push(page);
+            self.fans.borrow_mut().push(fu);
         }
         for (i, info) in drives.iter().enumerate() {
             let (page, du) = build_drive_page(&self.shared, i, info);
@@ -2874,6 +3000,55 @@ fn build_gpu_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &GpuInfo) -> (a
     (page, gu)
 }
 
+struct FanUi {
+    idx: usize,
+    area: gtk::DrawingArea,
+    scale_lbl: gtk::Label,
+    rpm_lbl: gtk::Label,
+}
+
+// Build one fan detail page (mirrors Mission Center's Fan view): a fan-speed
+// graph (1 min) plus the current RPM.
+fn build_fan_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &FanInfo) -> (adw::PreferencesPage, FanUi) {
+    let page = adw::PreferencesPage::new();
+
+    let g_head = adw::PreferencesGroup::builder().title(info.label.clone()).build();
+    let row = adw::ActionRow::builder().title("Kipas").subtitle(info.label.clone()).build();
+    g_head.add(&row);
+    page.add(&g_head);
+
+    let g_graph = adw::PreferencesGroup::builder().title("Kecepatan Kipas (1 menit)").build();
+    let scale_lbl = gtk::Label::new(Some("0 RPM"));
+    scale_lbl.add_css_class("dim-label");
+    g_graph.set_header_suffix(Some(&scale_lbl));
+    let area = gtk::DrawingArea::new();
+    area.set_content_height(150);
+    area.set_hexpand(true);
+    area.add_css_class("cpu-graph-frame");
+    area.set_margin_top(6);
+    area.set_margin_bottom(6);
+    {
+        let sh = shared.clone();
+        area.set_draw_func(move |_a, cr, w, h| {
+            if let Ok(g) = sh.lock() {
+                if let Some(f) = g.fans.get(idx) {
+                    let mx = f.hist.iter().cloned().fold(1.0_f64, f64::max) * 1.15;
+                    draw_graph(cr, w as f64, h as f64, &f.hist, mx);
+                }
+            }
+        });
+    }
+    g_graph.add(&area);
+    page.add(&g_graph);
+
+    let g_stat = adw::PreferencesGroup::builder().title("Statistik").build();
+    let rpm_lbl = info_row("Kecepatan Kipas", &g_stat);
+    page.add(&g_stat);
+
+    let fu = FanUi { idx, area, scale_lbl, rpm_lbl };
+    (page, fu)
+}
+
 fn build_ui(app: &adw::Application) {
     // Force full-dark scheme regardless of the system theme.
     adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
@@ -2894,6 +3069,7 @@ fn build_ui(app: &adw::Application) {
     }));
     gather_drives_static(&shared);
     gather_gpus_static(&shared);
+    gather_fans_static(&shared);
     spawn_sampler(shared.clone());
 
     let window = adw::ApplicationWindow::builder()
@@ -3279,6 +3455,7 @@ fn build_ui(app: &adw::Application) {
         mem_lbl,
         drives: RefCell::new(Vec::new()),
         gpus: RefCell::new(Vec::new()),
+        fans: RefCell::new(Vec::new()),
         shared: shared.clone(),
         stack: stack.clone(),
         sidebar: sidebar.clone(),
@@ -3287,14 +3464,19 @@ fn build_ui(app: &adw::Application) {
         dyn_sig: RefCell::new(String::new()),
     });
 
-    // Build the dynamic tabs (GPUs + drives) now so they appear at startup.
+    // Build the dynamic tabs (GPUs + fans + drives) now so they appear at startup.
     {
-        let (gs, ds) = shared
+        let (gs, fs_, ds) = shared
             .lock()
-            .map(|g| (g.gpus.clone(), g.drives.clone()))
+            .map(|g| (g.gpus.clone(), g.fans.clone(), g.drives.clone()))
             .unwrap_or_default();
-        ui.rebuild_dynamic(&gs, &ds);
-        *ui.dyn_sig.borrow_mut() = format!("{}#{}", gpu_signature(&gs), drive_signature(&ds));
+        ui.rebuild_dynamic(&gs, &fs_, &ds);
+        *ui.dyn_sig.borrow_mut() = format!(
+            "{}#{}#{}",
+            gpu_signature(&gs),
+            fan_signature(&fs_),
+            drive_signature(&ds)
+        );
     }
 
     let sh = shared.clone();
