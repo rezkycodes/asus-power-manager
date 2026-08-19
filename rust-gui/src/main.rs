@@ -99,7 +99,7 @@ struct FanInfo {
 #[derive(Default, Clone)]
 struct NetInfo {
     iface: String,
-    kind: String,  // "Wired"/"Wireless"/"Lainnya"
+    kind: String,  // "Wired"/"Wireless"/"Other"
     model: String,
     mac: String,
     is_wireless: bool,
@@ -475,7 +475,7 @@ fn gather_static(sh: &Arc<Mutex<Shared>>, logical: usize) {
                     "Model name" if model.is_empty() => model = v.to_string(),
                     "Socket(s)" => sockets = v.to_string(),
                     "Virtualization" => virt = v.to_string(),
-                    "Hypervisor vendor" => vm = "Ya".to_string(),
+                    "Hypervisor vendor" => vm = "Yes".to_string(),
                     "L1d cache" => l1d = v.to_string(),
                     "L1i cache" => l1i = v.to_string(),
                     "L2 cache" => l2 = v.to_string(),
@@ -1338,7 +1338,7 @@ fn sample_bats(sh: &Arc<Mutex<Shared>>) {
             b.state = match st.as_str() {
                 "Full" => "Full".into(),
                 "Charging" => "Charging".into(),
-                "Discharging" => "Mengosongkan".into(),
+                "Discharging" => "Discharging".into(),
                 "Not charging" => "Not charging".into(),
                 s if !s.is_empty() => s.to_string(),
                 _ => "Unknown".into(),
@@ -1374,7 +1374,7 @@ fn sample_bats(sh: &Arc<Mutex<Shared>>) {
                 b.energy_full_design = efd;
                 b.capacity_health = if efd > 0.0 { ef / efd * 100.0 } else { 0.0 };
                 b.charge_threshold = match num("charge_control_end_threshold") {
-                    Some(t) if t < 100.0 => "Ya".into(),
+                    Some(t) if t < 100.0 => "Yes".into(),
                     Some(_) => "No".into(),
                     None => "—".into(),
                 };
@@ -1429,7 +1429,7 @@ fn enumerate_nets() -> Vec<NetInfo> {
             } else if has_dev {
                 ("Wired", 0)
             } else {
-                ("Lainnya", 2)
+                ("Other", 2)
             };
             let bus = fs::read_link(format!("{base}/device"))
                 .ok()
@@ -1531,10 +1531,10 @@ fn sample_nets(sh: &Arc<Mutex<Shared>>) {
             }
             let oper = fs::read_to_string(format!("{base}/operstate")).unwrap_or_default().trim().to_string();
             n.status = match oper.as_str() {
-                "up" => "Terhubung".into(),
+                "up" => "Connected".into(),
                 "unknown" => {
                     if n.total_rx > 0 || n.total_tx > 0 {
-                        "Terhubung".into()
+                        "Connected".into()
                     } else {
                         "Unknown".into()
                     }
@@ -2284,7 +2284,7 @@ impl Ui {
 
         // CPU monitor
         self.row_cpu_mon.set_subtitle(&format!(
-            "Governor: {} @ {} MHz | Turbo: {} | Profil: {}",
+            "Governor: {} @ {} MHz | Turbo: {} | Profile: {}",
             g.governor.to_uppercase(),
             g.freq_mhz,
             g.boost,
@@ -3048,7 +3048,7 @@ fn build_rgb_page() -> adw::PreferencesPage {
     g_pick.add(&row_pick);
 
     // Sliders
-    let g_sl = adw::PreferencesGroup::builder().title("Penyesuaian Manual (Slider RGB)").build();
+    let g_sl = adw::PreferencesGroup::builder().title("Manual Adjustment (RGB Sliders)").build();
     let mk_scale = || {
         let s = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 255.0, 1.0);
         s.set_size_request(180, -1);
@@ -3686,7 +3686,7 @@ fn build_memory_page(shared: &Arc<Mutex<Shared>>) -> MemPage {
     g_swap.add(&swap_area);
     page.add(&g_swap);
 
-    let g_det = adw::PreferencesGroup::builder().title("Rincian").build();
+    let g_det = adw::PreferencesGroup::builder().title("Details").build();
     let mut mem_lbl = std::collections::HashMap::new();
     mem_lbl.insert("used", info_row("In Use", &g_det));
     mem_lbl.insert("avail", info_row("Available", &g_det));
@@ -3699,7 +3699,7 @@ fn build_memory_page(shared: &Arc<Mutex<Shared>>) -> MemPage {
     let g_hw = adw::PreferencesGroup::builder()
         .title("Hardware (DIMM)")
         .build();
-    mem_lbl.insert("dtype", info_row("Tipe", &g_hw));
+    mem_lbl.insert("dtype", info_row("Type", &g_hw));
     mem_lbl.insert("dform", info_row("Form Factor", &g_hw));
     mem_lbl.insert("dspeed", info_row("Speed", &g_hw));
     mem_lbl.insert("dslots", info_row("Slots Used", &g_hw));
@@ -3798,13 +3798,13 @@ fn build_drive_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &DriveInfo) -
         l.set_text(v);
     };
     det("Capacity", &fmt_bytes(info.capacity), &g_det);
-    det("Terformat", &fmt_bytes(info.formatted), &g_det);
-    det("System Disk", if info.is_system { "Ya" } else { "No" }, &g_det);
-    det("Tipe", &info.kind, &g_det);
+    det("Formatted", &fmt_bytes(info.formatted), &g_det);
+    det("System Disk", if info.is_system { "Yes" } else { "No" }, &g_det);
+    det("Type", &info.kind, &g_det);
     det("WWN", if info.wwn.is_empty() { "—" } else { &info.wwn }, &g_det);
     det("Serial", if info.serial.is_empty() { "—" } else { &info.serial }, &g_det);
     if info.rotational {
-        det("Rotasi", "HDD (berputar)", &g_det);
+        det("Rotation", "HDD (spinning)", &g_det);
     }
     page.add(&g_det);
 
@@ -4008,9 +4008,9 @@ fn build_gpu_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &GpuInfo) -> (a
         l.set_selectable(true);
         l.set_text(v);
     };
-    det("Tipe", &info.kind, &g_det);
+    det("Type", &info.kind, &g_det);
     det("Name", &info.name, &g_det);
-    det("Bus PCI", if info.bus.is_empty() { "—" } else { &info.bus }, &g_det);
+    det("PCI Bus", if info.bus.is_empty() { "—" } else { &info.bus }, &g_det);
     let lbl_pcie = info_row("PCI Express", &g_det);
     lbl.insert("pcie", lbl_pcie);
     page.add(&g_det);
@@ -4187,15 +4187,15 @@ fn build_net_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &NetInfo) -> (a
     lbl.insert("status", info_row("Status", &g_det));
     if info.is_wireless {
         det("SSID", &g_det, &mut lbl, "ssid");
-        lbl.insert("signal", info_row("Kekuatan Sinyal", &g_det));
+        lbl.insert("signal", info_row("Signal Strength", &g_det));
         lbl.insert("freq", info_row("Frequency", &g_det));
     }
-    det("Alamat Hardware", &g_det, &mut lbl, "mac");
+    det("Hardware Address", &g_det, &mut lbl, "mac");
     if let Some(l) = lbl.get("mac") {
         l.set_text(if info.mac.is_empty() { "—" } else { &info.mac });
     }
-    det("Alamat IPv4", &g_det, &mut lbl, "ipv4");
-    det("Alamat IPv6", &g_det, &mut lbl, "ipv6");
+    det("IPv4 Address", &g_det, &mut lbl, "ipv4");
+    det("IPv6 Address", &g_det, &mut lbl, "ipv6");
     page.add(&g_det);
 
     let nu = NetUi { idx, area, scale_lbl, lbl };
@@ -4299,12 +4299,12 @@ fn build_bat_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &BatInfo) -> (a
         lm.insert(key, l);
     };
     det("Serial", &g_det, &mut lbl, "serial");
-    let l_type = info_row("Tipe", &g_det);
+    let l_type = info_row("Type", &g_det);
     l_type.set_text(if info.is_system { "Battery" } else { "Peripheral" });
     let l_pw = info_row("Powering System", &g_det);
-    l_pw.set_text(if info.is_system { "Ya" } else { "No" });
+    l_pw.set_text(if info.is_system { "Yes" } else { "No" });
     if info.is_system {
-        lbl.insert("tech", info_row("Teknologi", &g_det));
+        lbl.insert("tech", info_row("Technology", &g_det));
         lbl.insert("health", info_row("Capacity (Health)", &g_det));
         lbl.insert("ef", info_row("Energy Full", &g_det));
         lbl.insert("efd", info_row("Energy Full (desain)", &g_det));
@@ -4972,6 +4972,9 @@ fn build_ui(app: &adw::Application) {
          .boxed-list, .card { background-color: #0a0a0a; border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; } \
          .boxed-list > row, .card > row { background-color: transparent; } \
          .linked > togglebutton:checked { background-color: #2a2a2a; color: #ffffff; } \
+         levelbar trough { background-color: #1a1a1a; border: none; } \
+         levelbar block { background-color: #e0e0e0; border: none; } \
+         levelbar block.low, levelbar block.high, levelbar block.full { background-color: #e0e0e0; } \
          button.suggested-action { background-color: #e6e6e6; color: #000000; box-shadow: none; } \
          button.suggested-action:hover { background-color: #f2f2f2; color: #000000; } \
          button.destructive-action { background-color: #333333; color: #ffffff; box-shadow: none; } \
