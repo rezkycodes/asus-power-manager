@@ -26,7 +26,7 @@ DBUS_ADDR="unix:path=/run/user/${USER_UID}/bus"
 
 notify_user() {
     if [[ -n "$ACTIVE_USER" && -n "$USER_UID" ]]; then
-        su - "$ACTIVE_USER" -c "DISPLAY=:0 DBUS_SESSION_BUS_ADDRESS=$DBUS_ADDR notify-send -u normal '🔋 Battery Manager' '$1'" 2>/dev/null || true
+        su - "$ACTIVE_USER" -c "DISPLAY=:0 DBUS_SESSION_BUS_ADDRESS=$DBUS_ADDR notify-send -a 'Tweaks ASUS TUF' -i 'com.rezkycodes.AsusTufCpu' -u normal '⚡ Tweaks ASUS TUF' '$1'" 2>/dev/null || true
     fi
 }
 
@@ -50,7 +50,7 @@ if [[ "$AC_ONLINE" == "1" ]]; then
     for usb in /sys/bus/usb/devices/*/power/control; do echo "on" > "$usb" 2>/dev/null; done
     bluetoothctl power on 2>/dev/null
 
-    notify_user "⚡ Performance Mode — Charger terdeteksi"
+    notify_user "⚡ Performance Mode — AC connected"
 
 else
     echo "$(date '+%Y-%m-%d %H:%M:%S') → Battery save mode" >> "$LOG_FILE"
@@ -84,7 +84,7 @@ else
         echo "$NEW" > "$BRIGHT_FILE" 2>/dev/null
     fi
 
-    notify_user "🔋 Battery Save Mode — Charger dicabut"
+    notify_user "🍃 Battery Save Mode — Running on battery"
 fi
 
 echo "$(date '+%Y-%m-%d %H:%M:%S') Done" >> "$LOG_FILE"

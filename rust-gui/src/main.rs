@@ -1890,6 +1890,10 @@ fn check_temp_alerts(sh: &Arc<Mutex<Shared>>) {
     for (_key, title, body) in to_fire {
         run_user(vec![
             "notify-send".into(),
+            "-a".into(),
+            "Tweaks ASUS TUF".into(),
+            "-i".into(),
+            "com.rezkycodes.AsusTufCpu".into(),
             "-u".into(),
             "critical".into(),
             title,
