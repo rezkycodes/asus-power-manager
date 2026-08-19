@@ -142,6 +142,15 @@ struct BatInfo {
     power_hist: VecDeque<f64>,
 }
 
+#[derive(Default, Clone)]
+struct ProcInfo {
+    pid: u32,
+    name: String,
+    cpu: f64,
+    rss_kb: u64,
+    swap_kb: u64,
+}
+
 #[derive(Default)]
 struct Shared {
     ready: bool,
@@ -219,6 +228,9 @@ struct Shared {
     nets: Vec<NetInfo>,
     // ── Batteries (system + peripherals) ──
     bats: Vec<BatInfo>,
+    // ── Processes (task manager) ──
+    procs: Vec<ProcInfo>,
+    proc_total: usize,
     // ── Systemd services (key "user:unit"/"sys:unit" -> state) ──
     services: std::collections::HashMap<String, String>,
 }
@@ -1013,6 +1025,81 @@ fn sample_gpus(sh: &Arc<Mutex<Shared>>, do_nvidia: bool) {
     }
 }
 
+fn read_total_jiffies() -> u64 {
+    if let Ok(s) = fs::read_to_string("/proc/stat") {
+        if let Some(line) = s.lines().next() {
+            return line.split_whitespace().skip(1).filter_map(|x| x.parse::<u64>().ok()).sum();
+        }
+    }
+    0
+}
+
+// Sample all processes: CPU% (over the interval), RSS and swap. `prev`/`prev_total`
+// persist between samples for the CPU delta. Returns (sorted list, total count).
+fn sample_procs(
+    prev: &mut std::collections::HashMap<u32, u64>,
+    prev_total: &mut u64,
+) -> (Vec<ProcInfo>, usize) {
+    let total = read_total_jiffies();
+    let dtotal = total.saturating_sub(*prev_total).max(1) as f64;
+    let mut cur: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+    let mut out: Vec<ProcInfo> = Vec::new();
+    let mut count = 0usize;
+    if let Ok(rd) = fs::read_dir("/proc") {
+        for e in rd.flatten() {
+            let fname = e.file_name();
+            let s = fname.to_string_lossy();
+            if s.is_empty() || !s.chars().all(|c| c.is_ascii_digit()) {
+                continue;
+            }
+            let pid: u32 = match s.parse() {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
+                Ok(x) => x,
+                Err(_) => continue,
+            };
+            count += 1;
+            let (lp, rp) = (stat.find('('), stat.rfind(')'));
+            let (name, rest) = match (lp, rp) {
+                (Some(l), Some(r)) if r + 2 <= stat.len() && l + 1 <= r => {
+                    (stat[l + 1..r].to_string(), &stat[r + 2..])
+                }
+                _ => continue,
+            };
+            let f: Vec<&str> = rest.split_whitespace().collect();
+            // rest[0]=state (field 3); utime=field14=rest[11], stime=field15=rest[12]
+            let utime = f.get(11).and_then(|x| x.parse::<u64>().ok()).unwrap_or(0);
+            let stime = f.get(12).and_then(|x| x.parse::<u64>().ok()).unwrap_or(0);
+            let jif = utime + stime;
+            cur.insert(pid, jif);
+            let dj = jif.saturating_sub(prev.get(&pid).copied().unwrap_or(jif)) as f64;
+            let cpu = (100.0 * dj / dtotal).clamp(0.0, 100.0);
+            let (mut rss, mut swap) = (0u64, 0u64);
+            if let Ok(st) = fs::read_to_string(format!("/proc/{pid}/status")) {
+                for line in st.lines() {
+                    if let Some(v) = line.strip_prefix("VmRSS:") {
+                        rss = v.trim().trim_end_matches("kB").trim().parse().unwrap_or(0);
+                    } else if let Some(v) = line.strip_prefix("VmSwap:") {
+                        swap = v.trim().trim_end_matches("kB").trim().parse().unwrap_or(0);
+                    }
+                }
+            }
+            out.push(ProcInfo { pid, name, cpu, rss_kb: rss, swap_kb: swap });
+        }
+    }
+    *prev = cur;
+    *prev_total = total;
+    out.sort_by(|a, b| {
+        b.cpu
+            .partial_cmp(&a.cpu)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(b.rss_kb.cmp(&a.rss_kb))
+    });
+    (out, count)
+}
+
 fn enumerate_bats() -> Vec<BatInfo> {
     let mut bats: Vec<(i32, BatInfo)> = Vec::new();
     if let Ok(rd) = fs::read_dir("/sys/class/power_supply") {
@@ -1469,6 +1556,8 @@ fn spawn_sampler(sh: Arc<Mutex<Shared>>) {
         let temp_path = find_temp_path();
         let mut prev: Option<((u64, u64), Vec<(u64, u64)>)> = None;
         let mut tick: u64 = 0;
+        let mut proc_prev: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+        let mut proc_total_prev: u64 = 0;
         loop {
             if let Some((ov, per)) = read_stat() {
                 if let Some((pov, pper)) = &prev {
@@ -1684,6 +1773,11 @@ fn spawn_sampler(sh: Arc<Mutex<Shared>>) {
                 refresh_bat_list(&sh);
                 refresh_net_extra(&sh);
                 refresh_part_usage(&sh);
+                let (pv, pc) = sample_procs(&mut proc_prev, &mut proc_total_prev);
+                if let Ok(mut g) = sh.lock() {
+                    g.procs = pv;
+                    g.proc_total = pc;
+                }
             }
             tick += 1;
             std::thread::sleep(Duration::from_secs(1));
@@ -1863,6 +1957,7 @@ struct Ui {
     mem_area: gtk::DrawingArea,
     swap_area: gtk::DrawingArea,
     mem_lbl: std::collections::HashMap<&'static str, gtk::Label>,
+    apps: AppsUi,
     drives: RefCell<Vec<DriveUi>>,
     gpus: RefCell<Vec<GpuUi>>,
     fans: RefCell<Vec<FanUi>>,
@@ -2125,6 +2220,55 @@ impl Ui {
         mset("dslots", g.dimm_slots.clone());
         self.mem_area.queue_draw();
         self.swap_area.queue_draw();
+
+        // ── Aplikasi & Proses ──
+        self.apps.row_hdr.set_subtitle(&format!("{} proses berjalan", g.proc_total));
+        {
+            let mut sig = String::with_capacity(1024);
+            for p in g.procs.iter().take(120) {
+                sig.push_str(&format!("{}:{:.0}:{};", p.pid, p.cpu, p.rss_kb));
+            }
+            if *self.apps.sig.borrow() != sig {
+                *self.apps.sig.borrow_mut() = sig;
+                while let Some(r) = self.apps.list.first_child() {
+                    self.apps.list.remove(&r);
+                }
+                let want = self.apps.sel.get();
+                for p in g.procs.iter().take(120) {
+                    let row = gtk::ListBoxRow::new();
+                    row.set_widget_name(&p.pid.to_string());
+                    let bx = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+                    bx.set_margin_start(12);
+                    bx.set_margin_end(12);
+                    bx.set_margin_top(6);
+                    bx.set_margin_bottom(6);
+                    let cell = |t: String, w: i32, x: f32, dim: bool| {
+                        let l = gtk::Label::new(Some(&t));
+                        l.set_xalign(x);
+                        if w > 0 {
+                            l.set_size_request(w, -1);
+                        } else {
+                            l.set_hexpand(true);
+                            l.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                        }
+                        if dim {
+                            l.add_css_class("dim-label");
+                        }
+                        l
+                    };
+                    bx.append(&cell(p.name.clone(), 0, 0.0, false));
+                    bx.append(&cell(p.pid.to_string(), 70, 1.0, true));
+                    bx.append(&cell(format!("{:.0}%", p.cpu), 60, 1.0, false));
+                    bx.append(&cell(fmt_kib(p.rss_kb), 90, 1.0, false));
+                    bx.append(&cell(if p.swap_kb == 0 { "0".into() } else { fmt_kib(p.swap_kb) }, 90, 1.0, true));
+                    row.set_child(Some(&bx));
+                    self.apps.list.append(&row);
+                    if want == Some(p.pid) {
+                        self.apps.list.select_row(Some(&row));
+                    }
+                }
+            }
+        }
 
         // ── Dynamic tabs (GPUs + fans + nets + drives + bats): rebuild on change, then update ──
         let sig = format!(
@@ -3795,6 +3939,104 @@ fn build_bat_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &BatInfo) -> (a
     (page, bu)
 }
 
+fn fmt_kib(kb: u64) -> String {
+    let x = kb as f64;
+    if x >= 1048576.0 {
+        format!("{:.1} GiB", x / 1048576.0)
+    } else if x >= 1024.0 {
+        format!("{:.0} MiB", x / 1024.0)
+    } else {
+        format!("{kb} KiB")
+    }
+}
+
+struct AppsUi {
+    row_hdr: adw::ActionRow,
+    list: gtk::ListBox,
+    sel: Rc<Cell<Option<u32>>>,
+    sig: RefCell<String>,
+}
+
+// Build the Apps/Processes tab (Mission Center-style task manager): a live
+// process table (Name, PID, CPU%, Memory, Swap) sorted by CPU, with Stop
+// (SIGTERM) / Force stop (SIGKILL) acting on the selected row.
+fn build_apps_page(_shared: &Arc<Mutex<Shared>>) -> (adw::PreferencesPage, AppsUi) {
+    let page = adw::PreferencesPage::new();
+
+    let g_head = adw::PreferencesGroup::builder().title("Aplikasi &amp; Proses").build();
+    let row_hdr = adw::ActionRow::builder().title("Proses").subtitle("Memuat...").build();
+    let sel: Rc<Cell<Option<u32>>> = Rc::new(Cell::new(None));
+    let btn_stop = gtk::Button::builder().label("Hentikan").valign(gtk::Align::Center).build();
+    let btn_kill = gtk::Button::builder().label("Paksa").valign(gtk::Align::Center).build();
+    btn_kill.add_css_class("destructive-action");
+    {
+        let sel = sel.clone();
+        btn_stop.connect_clicked(move |_| {
+            if let Some(pid) = sel.get() {
+                run_user(vec!["kill".into(), pid.to_string()]);
+            }
+        });
+    }
+    {
+        let sel = sel.clone();
+        btn_kill.connect_clicked(move |_| {
+            if let Some(pid) = sel.get() {
+                run_user(vec!["kill".into(), "-9".into(), pid.to_string()]);
+            }
+        });
+    }
+    row_hdr.add_suffix(&btn_stop);
+    row_hdr.add_suffix(&btn_kill);
+    g_head.add(&row_hdr);
+    page.add(&g_head);
+
+    let g_tbl = adw::PreferencesGroup::builder().title("Proses (menurut pemakaian CPU)").build();
+    let col = |t: &str, w: i32, xalign: f32| {
+        let l = gtk::Label::new(Some(t));
+        l.set_xalign(xalign);
+        if w > 0 {
+            l.set_size_request(w, -1);
+        } else {
+            l.set_hexpand(true);
+        }
+        l.add_css_class("dim-label");
+        l
+    };
+    let hdr = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    hdr.set_margin_start(12);
+    hdr.set_margin_end(12);
+    hdr.set_margin_top(6);
+    hdr.set_margin_bottom(6);
+    hdr.append(&col("Nama", 0, 0.0));
+    hdr.append(&col("PID", 70, 1.0));
+    hdr.append(&col("CPU", 60, 1.0));
+    hdr.append(&col("Memori", 90, 1.0));
+    hdr.append(&col("Swap", 90, 1.0));
+
+    let list = gtk::ListBox::new();
+    list.add_css_class("boxed-list");
+    list.set_selection_mode(gtk::SelectionMode::Single);
+    {
+        let sel = sel.clone();
+        list.connect_row_selected(move |_lb, row| {
+            sel.set(row.and_then(|r| r.widget_name().parse::<u32>().ok()));
+        });
+    }
+    let sw = gtk::ScrolledWindow::new();
+    sw.set_child(Some(&list));
+    sw.set_min_content_height(440);
+    sw.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+
+    let vb = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    vb.append(&hdr);
+    vb.append(&sw);
+    g_tbl.add(&vb);
+    page.add(&g_tbl);
+
+    let ui = AppsUi { row_hdr, list, sel, sig: RefCell::new(String::new()) };
+    (page, ui)
+}
+
 fn build_ui(app: &adw::Application) {
     // Force full-dark scheme regardless of the system theme.
     adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
@@ -3843,6 +4085,10 @@ fn build_ui(app: &adw::Application) {
     let (memory_page, row_mem, mem_bar, mem_area, swap_area, mem_lbl) = build_memory_page(&shared);
     let mep = stack.add_titled(&memory_page, Some("memory"), "Memory");
     mep.set_icon_name(Some("drive-harddisk-symbolic"));
+
+    // ── Apps / Processes page ──
+    let (apps_page, apps_ui) = build_apps_page(&shared);
+    stack.add_titled(&apps_page, Some("apps"), "Aplikasi");
 
     // ── Power page ──
     let power_page = adw::PreferencesPage::new();
@@ -4100,6 +4346,7 @@ fn build_ui(app: &adw::Application) {
     sidebar.append(&sidebar_row("rgb", "Keyboard RGB", "lucide-keyboard"));
     sidebar.append(&sidebar_row("mouse", "Mouse Logitech", "lucide-mouse"));
     sidebar.append(&sidebar_row("services", "Layanan Sistem", "lucide-server"));
+    sidebar.append(&sidebar_row("apps", "Aplikasi & Proses", "lucide-apps"));
     {
         let stack = stack.clone();
         sidebar.connect_row_selected(move |_lb, row| {
@@ -4201,6 +4448,7 @@ fn build_ui(app: &adw::Application) {
         mem_area,
         swap_area,
         mem_lbl,
+        apps: apps_ui,
         drives: RefCell::new(Vec::new()),
         gpus: RefCell::new(Vec::new()),
         fans: RefCell::new(Vec::new()),
