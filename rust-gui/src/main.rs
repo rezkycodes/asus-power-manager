@@ -6,6 +6,7 @@ use adw::prelude::*;
 use gtk::glib;
 
 use std::cell::Cell;
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -777,6 +778,435 @@ fn build_cpu_page(shared: &Arc<Mutex<Shared>>, ui_core: &mut Vec<gtk::DrawingAre
     (page, row_model, util_bar, temp_area, l)
 }
 
+// ───────────────────────── RGB tab ─────────────────────────
+struct RgbState {
+    mode: String,
+    r: u8,
+    g: u8,
+    b: u8,
+    speed: String,
+    brightness: u8,
+}
+
+fn read_rgb_conf() -> RgbState {
+    let c = "/etc/asus-power-manager/rgb.conf";
+    let gv = |k: &str, d: &str| read_kv(c, k).unwrap_or_else(|| d.to_string());
+    RgbState {
+        mode: gv("MODE", "0"),
+        r: gv("RED", "0").parse().unwrap_or(0),
+        g: gv("GREEN", "200").parse().unwrap_or(200),
+        b: gv("BLUE", "255").parse().unwrap_or(255),
+        speed: gv("SPEED", "1"),
+        brightness: gv("BRIGHTNESS", "3").parse().unwrap_or(3),
+    }
+}
+fn rgb_mode_name(m: &str) -> &'static str {
+    match m {
+        "1" => "Breathing",
+        "2" => "Color Cycle",
+        "3" => "Strobing",
+        "10" => "Pulse",
+        _ => "Static",
+    }
+}
+fn rounded_path(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, rad: f64) {
+    use std::f64::consts::PI;
+    cr.new_sub_path();
+    cr.arc(x + w - rad, y + rad, rad, -PI / 2.0, 0.0);
+    cr.arc(x + w - rad, y + h - rad, rad, 0.0, PI / 2.0);
+    cr.arc(x + rad, y + h - rad, rad, PI / 2.0, PI);
+    cr.arc(x + rad, y + rad, rad, PI, 3.0 * PI / 2.0);
+    cr.close_path();
+}
+fn draw_swatch(cr: &gtk::cairo::Context, w: f64, h: f64, r: u8, g: u8, b: u8) {
+    rounded_path(cr, 2.0, 2.0, w - 4.0, h - 4.0, 6.0);
+    cr.set_source_rgb(r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0);
+    let _ = cr.fill_preserve();
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.6);
+    cr.set_line_width(2.0);
+    let _ = cr.stroke();
+}
+fn draw_circle(cr: &gtk::cairo::Context, w: f64, h: f64, r: u8, g: u8, b: u8) {
+    let radius = (w.min(h)) / 2.0 - 2.0;
+    cr.arc(w / 2.0, h / 2.0, radius, 0.0, 2.0 * std::f64::consts::PI);
+    cr.set_source_rgb(r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0);
+    let _ = cr.fill_preserve();
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.45);
+    cr.set_line_width(2.0);
+    let _ = cr.stroke();
+}
+
+fn build_rgb_page() -> adw::PreferencesPage {
+    let st = Rc::new(RefCell::new(read_rgb_conf()));
+    let guard = Rc::new(Cell::new(false));
+    let debounce: Rc<Cell<Option<glib::SourceId>>> = Rc::new(Cell::new(None));
+    let page = adw::PreferencesPage::new();
+
+    // Preview
+    let g_prev = adw::PreferencesGroup::builder().title("Status Warna &amp; Efek Aktif").build();
+    let row_prev = adw::ActionRow::builder().title("Warna Keyboard Saat Ini").build();
+    let preview = gtk::DrawingArea::new();
+    preview.set_content_width(52);
+    preview.set_content_height(28);
+    preview.set_valign(gtk::Align::Center);
+    {
+        let st = st.clone();
+        preview.set_draw_func(move |_a, cr, w, h| {
+            let s = st.borrow();
+            draw_swatch(cr, w as f64, h as f64, s.r, s.g, s.b);
+        });
+    }
+    row_prev.add_suffix(&preview);
+    g_prev.add(&row_prev);
+    page.add(&g_prev);
+
+    // apply + refresh closures
+    let apply: Rc<dyn Fn()> = {
+        let st = st.clone();
+        Rc::new(move || {
+            let s = st.borrow();
+            run_priv(vec![
+                script_path("battery-set-rgb.sh"),
+                s.mode.clone(),
+                s.r.to_string(),
+                s.g.to_string(),
+                s.b.to_string(),
+                s.speed.clone(),
+                s.brightness.to_string(),
+            ]);
+        })
+    };
+    let refresh_prev: Rc<dyn Fn()> = {
+        let st = st.clone();
+        let row = row_prev.clone();
+        let pv = preview.clone();
+        Rc::new(move || {
+            let s = st.borrow();
+            row.set_subtitle(&format!(
+                "RGB: ({}, {}, {}) | Hex: #{:02X}{:02X}{:02X} | Mode: {}",
+                s.r, s.g, s.b, s.r, s.g, s.b, rgb_mode_name(&s.mode)
+            ));
+            pv.queue_draw();
+        })
+    };
+    let schedule: Rc<dyn Fn()> = {
+        let apply = apply.clone();
+        let deb = debounce.clone();
+        Rc::new(move || {
+            if let Some(id) = deb.take() {
+                id.remove();
+            }
+            let apply2 = apply.clone();
+            let deb2 = deb.clone();
+            let id = glib::timeout_add_local(Duration::from_millis(80), move || {
+                apply2();
+                deb2.set(None);
+                glib::ControlFlow::Break
+            });
+            deb.set(Some(id));
+        })
+    };
+
+    // Color picker
+    let g_pick = adw::PreferencesGroup::builder().title("Pilih Warna Bebas (Color Wheel)").build();
+    let row_pick = adw::ActionRow::builder().title("Dialog Spektrum Warna").subtitle("Buka pemilih warna GNOME").build();
+    let dialog = gtk::ColorDialog::new();
+    dialog.set_with_alpha(false);
+    let color_btn = gtk::ColorDialogButton::new(Some(dialog));
+    color_btn.set_valign(gtk::Align::Center);
+    {
+        let s = st.borrow();
+        color_btn.set_rgba(&gtk::gdk::RGBA::new(s.r as f32 / 255.0, s.g as f32 / 255.0, s.b as f32 / 255.0, 1.0));
+    }
+    row_pick.add_suffix(&color_btn);
+    g_pick.add(&row_pick);
+
+    // Sliders
+    let g_sl = adw::PreferencesGroup::builder().title("Penyesuaian Manual (Slider RGB)").build();
+    let mk_scale = || {
+        let s = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 255.0, 1.0);
+        s.set_size_request(180, -1);
+        s.set_valign(gtk::Align::Center);
+        s
+    };
+    let (scale_r, scale_g, scale_b) = (mk_scale(), mk_scale(), mk_scale());
+    {
+        let s = st.borrow();
+        scale_r.set_value(s.r as f64);
+        scale_g.set_value(s.g as f64);
+        scale_b.set_value(s.b as f64);
+    }
+    for (title, css, scale) in [
+        ("Merah (Red)", "red-slider", &scale_r),
+        ("Hijau (Green)", "green-slider", &scale_g),
+        ("Biru (Blue)", "blue-slider", &scale_b),
+    ] {
+        scale.add_css_class(css);
+        let row = adw::ActionRow::builder().title(title).build();
+        row.add_suffix(scale);
+        g_sl.add(&row);
+    }
+
+    // channel change handler factory
+    let attach_channel = |scale: &gtk::Scale, ch: char| {
+        let st = st.clone();
+        let guard = guard.clone();
+        let sched = schedule.clone();
+        let rp = refresh_prev.clone();
+        let cbtn = color_btn.clone();
+        let g2 = guard.clone();
+        scale.connect_value_changed(move |s| {
+            if guard.get() {
+                return;
+            }
+            let v = s.value() as u8;
+            {
+                let mut stt = st.borrow_mut();
+                match ch {
+                    'r' => stt.r = v,
+                    'g' => stt.g = v,
+                    _ => stt.b = v,
+                }
+            }
+            // sync color button (guarded)
+            let s2 = st.borrow();
+            g2.set(true);
+            cbtn.set_rgba(&gtk::gdk::RGBA::new(s2.r as f32 / 255.0, s2.g as f32 / 255.0, s2.b as f32 / 255.0, 1.0));
+            g2.set(false);
+            drop(s2);
+            rp();
+            sched();
+        });
+    };
+    attach_channel(&scale_r, 'r');
+    attach_channel(&scale_g, 'g');
+    attach_channel(&scale_b, 'b');
+
+    // color button handler
+    {
+        let st = st.clone();
+        let guard = guard.clone();
+        let sched = schedule.clone();
+        let rp = refresh_prev.clone();
+        let (sr, sg, sb) = (scale_r.clone(), scale_g.clone(), scale_b.clone());
+        color_btn.connect_rgba_notify(move |b| {
+            if guard.get() {
+                return;
+            }
+            let c = b.rgba();
+            let (r, g, bl) = ((c.red() * 255.0) as u8, (c.green() * 255.0) as u8, (c.blue() * 255.0) as u8);
+            {
+                let mut s = st.borrow_mut();
+                s.r = r;
+                s.g = g;
+                s.b = bl;
+            }
+            guard.set(true);
+            sr.set_value(r as f64);
+            sg.set_value(g as f64);
+            sb.set_value(bl as f64);
+            guard.set(false);
+            rp();
+            sched();
+        });
+    }
+
+    // Palette presets
+    let g_pal = adw::PreferencesGroup::builder()
+        .title("Palet Warna Cepat (Preset)")
+        .description("Klik warna untuk menerapkannya seketika")
+        .build();
+    let pal_row = adw::PreferencesRow::builder().activatable(false).build();
+    let pal_box = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    pal_box.set_halign(gtk::Align::Center);
+    pal_box.set_margin_top(10);
+    pal_box.set_margin_bottom(10);
+    let palette: [(u8, u8, u8); 9] = [
+        (0, 200, 255),
+        (0, 100, 255),
+        (160, 0, 255),
+        (255, 0, 127),
+        (255, 0, 0),
+        (255, 120, 0),
+        (255, 216, 0),
+        (0, 230, 118),
+        (255, 255, 255),
+    ];
+    for (r, g, b) in palette {
+        let btn = gtk::Button::new();
+        btn.add_css_class("flat");
+        let area = gtk::DrawingArea::new();
+        area.set_content_width(34);
+        area.set_content_height(34);
+        area.set_draw_func(move |_a, cr, w, h| draw_circle(cr, w as f64, h as f64, r, g, b));
+        btn.set_child(Some(&area));
+        let st = st.clone();
+        let guard = guard.clone();
+        let apply = apply.clone();
+        let rp = refresh_prev.clone();
+        let (sr, sg, sb) = (scale_r.clone(), scale_g.clone(), scale_b.clone());
+        let cbtn = color_btn.clone();
+        btn.connect_clicked(move |_| {
+            {
+                let mut s = st.borrow_mut();
+                s.r = r;
+                s.g = g;
+                s.b = b;
+            }
+            guard.set(true);
+            sr.set_value(r as f64);
+            sg.set_value(g as f64);
+            sb.set_value(b as f64);
+            cbtn.set_rgba(&gtk::gdk::RGBA::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0));
+            guard.set(false);
+            rp();
+            apply();
+        });
+        pal_box.append(&btn);
+    }
+    pal_row.set_child(Some(&pal_box));
+    g_pal.add(&pal_row);
+
+    page.add(&g_pal);
+    page.add(&g_pick);
+    page.add(&g_sl);
+
+    // Effects
+    let g_eff = adw::PreferencesGroup::builder().title("Efek Animasi (Aura Lighting)").build();
+    let effects = [
+        ("0", "Static (Warna Tetap)"),
+        ("1", "Breathing (Pernapasan)"),
+        ("10", "Pulse (Denyut)"),
+        ("2", "Color Cycle (Rainbow)"),
+        ("3", "Strobing (Berkedip)"),
+    ];
+    let eff_btns: Rc<Vec<(String, gtk::Button)>> = Rc::new(
+        effects.iter().map(|(id, _)| (id.to_string(), gtk::Button::with_label("Pilih"))).collect(),
+    );
+    let highlight_eff: Rc<dyn Fn(&str)> = {
+        let eb = eff_btns.clone();
+        Rc::new(move |active: &str| {
+            for (id, b) in eb.iter() {
+                if id == active {
+                    b.add_css_class("suggested-action");
+                    b.set_label("✓ Aktif");
+                } else {
+                    b.remove_css_class("suggested-action");
+                    b.set_label("Pilih");
+                }
+            }
+        })
+    };
+    for (idx, (id, title)) in effects.iter().enumerate() {
+        let row = adw::ActionRow::builder().title(*title).build();
+        let btn = eff_btns[idx].1.clone();
+        btn.set_valign(gtk::Align::Center);
+        let id_s = id.to_string();
+        let st = st.clone();
+        let apply = apply.clone();
+        let rp = refresh_prev.clone();
+        let hl = highlight_eff.clone();
+        btn.connect_clicked(move |_| {
+            st.borrow_mut().mode = id_s.clone();
+            hl(&id_s);
+            rp();
+            apply();
+        });
+        row.add_suffix(&btn);
+        g_eff.add(&row);
+    }
+    page.add(&g_eff);
+
+    // Brightness + Speed
+    let g_bs = adw::PreferencesGroup::builder().title("Kecerahan &amp; Kecepatan Efek").build();
+    // brightness
+    let row_b = adw::ActionRow::builder().title("Kecerahan Lampu Keyboard").build();
+    let box_b = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    box_b.set_valign(gtk::Align::Center);
+    let bri_btns: Rc<Vec<(u8, gtk::Button)>> = Rc::new(
+        [(0u8, "Mati"), (1, "Redup"), (2, "Sedang"), (3, "Terang")]
+            .iter()
+            .map(|(v, l)| (*v, gtk::Button::with_label(l)))
+            .collect(),
+    );
+    let hl_bri: Rc<dyn Fn(u8)> = {
+        let bb = bri_btns.clone();
+        Rc::new(move |active: u8| {
+            for (v, b) in bb.iter() {
+                if *v == active {
+                    b.add_css_class("suggested-action");
+                } else {
+                    b.remove_css_class("suggested-action");
+                }
+            }
+        })
+    };
+    for (v, btn) in bri_btns.iter() {
+        let v = *v;
+        let btn = btn.clone();
+        let st = st.clone();
+        let apply = apply.clone();
+        let hl = hl_bri.clone();
+        btn.connect_clicked(move |_| {
+            st.borrow_mut().brightness = v;
+            hl(v);
+            apply();
+        });
+        box_b.append(&btn);
+    }
+    row_b.add_suffix(&box_b);
+    g_bs.add(&row_b);
+    // speed
+    let row_s = adw::ActionRow::builder().title("Kecepatan Animasi Efek").build();
+    let box_s = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    box_s.set_valign(gtk::Align::Center);
+    let spd_btns: Rc<Vec<(String, gtk::Button)>> = Rc::new(
+        [("0", "Lambat"), ("1", "Sedang"), ("2", "Cepat")]
+            .iter()
+            .map(|(v, l)| (v.to_string(), gtk::Button::with_label(l)))
+            .collect(),
+    );
+    let hl_spd: Rc<dyn Fn(&str)> = {
+        let sb = spd_btns.clone();
+        Rc::new(move |active: &str| {
+            for (v, b) in sb.iter() {
+                if v == active {
+                    b.add_css_class("suggested-action");
+                } else {
+                    b.remove_css_class("suggested-action");
+                }
+            }
+        })
+    };
+    for (v, btn) in spd_btns.iter() {
+        let v = v.clone();
+        let btn = btn.clone();
+        let st = st.clone();
+        let apply = apply.clone();
+        let hl = hl_spd.clone();
+        btn.connect_clicked(move |_| {
+            st.borrow_mut().speed = v.clone();
+            hl(&v);
+            apply();
+        });
+        box_s.append(&btn);
+    }
+    row_s.add_suffix(&box_s);
+    g_bs.add(&row_s);
+    page.add(&g_bs);
+
+    // initial highlight + preview
+    {
+        let s = st.borrow();
+        highlight_eff(&s.mode);
+        hl_bri(s.brightness);
+        hl_spd(&s.speed);
+    }
+    refresh_prev();
+
+    page
+}
+
 fn build_ui(app: &adw::Application) {
     let logical = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     let shared = Arc::new(Mutex::new(Shared {
@@ -906,6 +1336,11 @@ fn build_ui(app: &adw::Application) {
     let pp = stack.add_titled(&power_page, Some("power"), "Daya & Baterai");
     pp.set_icon_name(Some("battery-symbolic"));
 
+    // ── Keyboard RGB page ──
+    let rgb_page = build_rgb_page();
+    let rgbp = stack.add_titled(&rgb_page, Some("rgb"), "Keyboard RGB");
+    rgbp.set_icon_name(Some("input-keyboard-symbolic"));
+
     toolbar.set_content(Some(&stack));
     window.set_content(Some(&toolbar));
 
@@ -926,7 +1361,10 @@ fn build_ui(app: &adw::Application) {
     let provider = gtk::CssProvider::new();
     provider.load_from_data(
         ".cpu-graph-frame { border: 1px solid rgba(41,128,236,0.55); border-radius: 6px; \
-         background-color: rgba(41,128,236,0.06); }",
+         background-color: rgba(41,128,236,0.06); } \
+         scale.red-slider highlight { background: #ff3b30; } \
+         scale.green-slider highlight { background: #34c759; } \
+         scale.blue-slider highlight { background: #007aff; }",
     );
     if let Some(display) = gtk::gdk::Display::default() {
         gtk::style_context_add_provider_for_display(&display, &provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
