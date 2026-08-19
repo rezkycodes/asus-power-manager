@@ -90,8 +90,12 @@ case "$ACTION" in
         elif [[ "$PARAM" == "250" || "$PARAM" == "4ms" ]]; then HZ_VAL="4ms"
         elif [[ "$PARAM" == "125" || "$PARAM" == "8ms" ]]; then HZ_VAL="8ms"
         fi
-        solaar config "$M_NAME" onboard_profiles Disabled 2>/dev/null || true
-        solaar config "$M_NAME" report_rate "$HZ_VAL" 2>/dev/null || true
+        # Only disable onboard profiles if not already off (avoids a slow extra solaar call)
+        if [[ "$(get_cached ONBOARD off)" != "off" ]]; then
+            solaar config "$M_NAME" onboard_profiles Disabled >/dev/null 2>&1 || true
+            set_cached "ONBOARD" "off"
+        fi
+        solaar config "$M_NAME" report_rate "$HZ_VAL" >/dev/null 2>&1 || true
         
         # Save cache
         HZ_NUM="1000"
@@ -105,12 +109,15 @@ case "$ACTION" in
 
     dpi)
         DPI_VAL="${PARAM:-1600}"
-        solaar config "$M_NAME" onboard_profiles Disabled 2>/dev/null || true
-        solaar config "$M_NAME" dpi "$DPI_VAL" 2>/dev/null || true
+        # Only disable onboard profiles if not already off (avoids a slow extra solaar call)
+        if [[ "$(get_cached ONBOARD off)" != "off" ]]; then
+            solaar config "$M_NAME" onboard_profiles Disabled >/dev/null 2>&1 || true
+            set_cached "ONBOARD" "off"
+        fi
+        solaar config "$M_NAME" dpi "$DPI_VAL" >/dev/null 2>&1 || true
         
         # Save cache
         set_cached "DPI" "$DPI_VAL"
-        set_cached "ONBOARD" "off"
         echo "DPI=$DPI_VAL"
         ;;
 
@@ -121,7 +128,7 @@ case "$ACTION" in
             OB_VAL="Profile 1"
             OB_CACHE="on"
         fi
-        solaar config "$M_NAME" onboard_profiles "$OB_VAL" 2>/dev/null || true
+        solaar config "$M_NAME" onboard_profiles "$OB_VAL" >/dev/null 2>&1 || true
         
         # Save cache
         set_cached "ONBOARD" "$OB_CACHE"

@@ -1035,7 +1035,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
 
         box_dpi_btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         box_dpi_btns.set_valign(Gtk.Align.CENTER)
-        for dpi_v in [400, 800, 1600, 3200, 6400]:
+        for dpi_v in [400, 800, 1200, 1600, 3200]:
             btn = Gtk.Button(label=f"{dpi_v}")
             btn.connect("clicked", lambda w, v=dpi_v: self.set_mouse_dpi(v))
             box_dpi_btns.append(btn)
