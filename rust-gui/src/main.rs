@@ -1414,8 +1414,171 @@ fn build_rgb_page() -> adw::PreferencesPage {
     page
 }
 
+fn sysctl_capture(is_user: bool, verb: &str, unit: &str) -> String {
+    let mut c = Command::new("systemctl");
+    if is_user {
+        c.arg("--user");
+    }
+    c.arg(verb).arg(unit);
+    if verb == "status" {
+        c.arg("--no-pager");
+    }
+    match c.output() {
+        Ok(o) => {
+            let mut s = String::from_utf8_lossy(&o.stdout).to_string();
+            let e = String::from_utf8_lossy(&o.stderr);
+            if !e.trim().is_empty() {
+                s.push_str(&e);
+            }
+            let s = s.trim_end().to_string();
+            if s.is_empty() {
+                "(kosong)".into()
+            } else {
+                s
+            }
+        }
+        Err(e) => format!("Error: {e}"),
+    }
+}
+fn journal_capture(is_user: bool, unit: &str) -> String {
+    let mut c = Command::new("journalctl");
+    if is_user {
+        c.arg("--user");
+    }
+    c.arg("-u").arg(unit).arg("-n").arg("30").arg("--no-pager");
+    match c.output() {
+        Ok(o) => {
+            let s = String::from_utf8_lossy(&o.stdout).trim_end().to_string();
+            if s.is_empty() {
+                "(belum ada catatan log)".into()
+            } else {
+                s
+            }
+        }
+        Err(e) => format!("Error: {e}"),
+    }
+}
+
+fn detail_textview(monospace: bool) -> gtk::TextView {
+    let tv = gtk::TextView::new();
+    tv.set_editable(false);
+    tv.set_cursor_visible(false);
+    tv.set_monospace(monospace);
+    tv.set_wrap_mode(gtk::WrapMode::WordChar);
+    tv.set_left_margin(8);
+    tv.set_top_margin(6);
+    tv
+}
+fn scrolled(child: &impl IsA<gtk::Widget>, min_h: i32) -> gtk::ScrolledWindow {
+    let sw = gtk::ScrolledWindow::new();
+    sw.set_min_content_height(min_h);
+    sw.set_child(Some(child));
+    sw.add_css_class("card");
+    sw
+}
+
+fn open_service_detail(parent: &adw::ApplicationWindow, is_user: bool, unit: &str) {
+    let unit = unit.to_string();
+    let win = adw::Window::new();
+    win.set_title(Some(&format!("Detail — {unit}")));
+    win.set_default_size(620, 740);
+    win.set_modal(true);
+    win.set_transient_for(Some(parent));
+
+    let tv_view = adw::ToolbarView::new();
+    let header = adw::HeaderBar::new();
+    let refresh_btn = gtk::Button::from_icon_name("view-refresh-symbolic");
+    refresh_btn.set_tooltip_text(Some("Segarkan"));
+    header.pack_end(&refresh_btn);
+    tv_view.add_top_bar(&header);
+
+    let vbox = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    vbox.set_margin_top(12);
+    vbox.set_margin_bottom(12);
+    vbox.set_margin_start(12);
+    vbox.set_margin_end(12);
+
+    let mk_label = |t: &str| {
+        let l = gtk::Label::new(Some(t));
+        l.set_xalign(0.0);
+        l.add_css_class("heading");
+        l
+    };
+
+    vbox.append(&mk_label(&format!(
+        "{} — {}",
+        unit,
+        if is_user { "Layanan Pengguna (--user)" } else { "Layanan Sistem (root)" }
+    )));
+    vbox.append(&mk_label("Status Operasional"));
+    let tv_status = detail_textview(true);
+    vbox.append(&scrolled(&tv_status, 130));
+    vbox.append(&mk_label("File Konfigurasi Unit (systemctl cat)"));
+    let tv_cat = detail_textview(true);
+    vbox.append(&scrolled(&tv_cat, 220));
+    vbox.append(&mk_label("Log Aktivitas Terbaru (journald)"));
+    let tv_logs = detail_textview(true);
+    vbox.append(&scrolled(&tv_logs, 180));
+
+    // action buttons
+    let hb = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    hb.set_halign(gtk::Align::End);
+    hb.set_margin_top(4);
+    let b_start = gtk::Button::with_label("Start");
+    b_start.add_css_class("suggested-action");
+    let b_stop = gtk::Button::with_label("Stop");
+    b_stop.add_css_class("destructive-action");
+    let b_restart = gtk::Button::with_label("Restart");
+    let run_action = |is_user: bool, action: &'static str, unit: String| {
+        if is_user {
+            run_user(vec!["systemctl".into(), "--user".into(), action.into(), unit]);
+        } else {
+            run_priv(vec!["systemctl".into(), action.into(), unit]);
+        }
+    };
+    {
+        let u = unit.clone();
+        b_start.connect_clicked(move |_| run_action(is_user, "start", u.clone()));
+    }
+    {
+        let u = unit.clone();
+        b_stop.connect_clicked(move |_| run_action(is_user, "stop", u.clone()));
+    }
+    {
+        let u = unit.clone();
+        b_restart.connect_clicked(move |_| run_action(is_user, "restart", u.clone()));
+    }
+    hb.append(&b_start);
+    hb.append(&b_stop);
+    hb.append(&b_restart);
+    vbox.append(&hb);
+
+    tv_view.set_content(Some(&vbox));
+    win.set_content(Some(&tv_view));
+
+    let refresh: Rc<dyn Fn()> = {
+        let unit = unit.clone();
+        let s = tv_status.clone();
+        let c = tv_cat.clone();
+        let l = tv_logs.clone();
+        Rc::new(move || {
+            s.buffer().set_text(&sysctl_capture(is_user, "status", &unit));
+            c.buffer().set_text(&sysctl_capture(is_user, "cat", &unit));
+            l.buffer().set_text(&journal_capture(is_user, &unit));
+        })
+    };
+    refresh();
+    {
+        let r = refresh.clone();
+        refresh_btn.connect_clicked(move |_| r());
+    }
+
+    win.present();
+}
+
 fn build_svc_group(
     shared: &Arc<Mutex<Shared>>,
+    window: &adw::ApplicationWindow,
     defs: &[(&str, &str, &str)],
     is_user: bool,
     group_title: &str,
@@ -1466,6 +1629,13 @@ fn build_svc_group(
         bx.append(&badge);
         bx.append(&toggle);
         bx.append(&restart);
+        let detail = seg_button("Detail");
+        {
+            let win = window.clone();
+            let unit = unit.to_string();
+            detail.connect_clicked(move |_| open_service_detail(&win, is_user, &unit));
+        }
+        bx.append(&detail);
         row.add_suffix(&bx);
         group.add(&row);
         out.push(SvcW {
@@ -1741,6 +1911,7 @@ fn build_ui(app: &adw::Application) {
     let mut svc_widgets: Vec<SvcW> = Vec::new();
     services_page.add(&build_svc_group(
         &shared,
+        &window,
         &USER_SVC,
         true,
         "Layanan AI &amp; Pengguna (User Daemons)",
@@ -1748,6 +1919,7 @@ fn build_ui(app: &adw::Application) {
     ));
     services_page.add(&build_svc_group(
         &shared,
+        &window,
         &SYS_SVC,
         false,
         "Layanan Infrastruktur Sistem (Root)",
