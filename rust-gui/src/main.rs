@@ -1830,9 +1830,9 @@ fn sample_smart(sh: &Arc<Mutex<Shared>>) {
 
 fn check_temp_alerts(sh: &Arc<Mutex<Shared>>) {
     const COOLDOWN: Duration = Duration::from_secs(300); // 5 minutes
-    const CPU_THRESH: f64 = 85.0;
-    const GPU_THRESH: f64 = 85.0;
-    const DISK_THRESH: f64 = 65.0;
+    const CPU_THRESH: f64 = 95.0;
+    const GPU_THRESH: f64 = 90.0;
+    const DISK_THRESH: f64 = 70.0;
 
     let now = Instant::now();
     // Collect candidate alerts: (source_key, title, body)
