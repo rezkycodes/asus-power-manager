@@ -4850,24 +4850,20 @@ fn build_ui(app: &adw::Application) {
     split.set_max_sidebar_width(260.0);
 
     // Collapse toggle in the content header, kept in sync with show-sidebar.
-    // Sidebar collapse/expand. Plain buttons flip show-sidebar directly (no
-    // bindable "active" state that can desync and get stuck). When collapsed the
-    // sidebar overlays and covers the content header, so the sidebar header also
-    // carries a hide button — otherwise there is no reachable control to close it.
-    let btn_show = gtk::Button::from_icon_name("sidebar-show-symbolic");
-    btn_show.set_tooltip_text(Some("Tampilkan / sembunyikan sidebar"));
-    content_header.pack_start(&btn_show);
-    {
-        let split = split.clone();
-        btn_show.connect_clicked(move |_| split.set_show_sidebar(!split.shows_sidebar()));
-    }
-    let btn_hide = gtk::Button::from_icon_name("sidebar-show-symbolic");
-    btn_hide.set_tooltip_text(Some("Sembunyikan sidebar"));
-    side_header.pack_start(&btn_hide);
-    {
-        let split = split.clone();
-        btn_hide.connect_clicked(move |_| split.set_show_sidebar(false));
-    }
+    // Sidebar toggle — same pattern as Mission Center: a single ToggleButton in
+    // the content header, its `active` bound bidirectionally to show-sidebar.
+    // The window opens wide (side-by-side) so it toggles both ways; when narrowed
+    // below the breakpoint the sidebar overlays and AdwOverlaySplitView dismisses
+    // it on click-outside — matching Mission Center's behaviour.
+    let toggle_sidebar_button = gtk::ToggleButton::new();
+    toggle_sidebar_button.set_icon_name("sidebar-show-symbolic");
+    toggle_sidebar_button.set_tooltip_text(Some("Toggle Sidebar"));
+    content_header.pack_start(&toggle_sidebar_button);
+    split
+        .bind_property("show-sidebar", &toggle_sidebar_button, "active")
+        .sync_create()
+        .bidirectional()
+        .build();
 
     {
         let stack = stack.clone();
