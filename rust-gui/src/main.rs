@@ -120,6 +120,15 @@ struct NetInfo {
 }
 
 #[derive(Default, Clone)]
+struct TsPeer {
+    name: String,
+    ip: String,
+    os: String,
+    online: bool,
+    is_self: bool,
+}
+
+#[derive(Default, Clone)]
 struct BatInfo {
     name: String,
     model: String,
@@ -238,6 +247,8 @@ struct Shared {
     fans: Vec<FanInfo>,
     // ── Network interfaces ──
     nets: Vec<NetInfo>,
+    // ── Tailscale tailnet devices (name + IP) ──
+    ts_peers: Vec<TsPeer>,
     // ── Batteries (system + peripherals) ──
     bats: Vec<BatInfo>,
     // ── Processes (task manager) ──
@@ -1604,6 +1615,59 @@ fn refresh_net_extra(sh: &Arc<Mutex<Shared>>) {
             }
         }
     }
+
+    // Tailnet device list — only query when a tailscale interface is present.
+    let has_ts = list.iter().any(|(iface, _)| iface.starts_with("tailscale"));
+    let peers = if has_ts { query_tailscale_peers() } else { Vec::new() };
+    if let Ok(mut s) = sh.lock() {
+        s.ts_peers = peers;
+    }
+}
+
+// Parse `tailscale status` plain output into the tailnet device list.
+// Device names in the plain output are DNS labels (hyphenated, no spaces), so
+// whitespace tokenisation is safe. Column layout:
+//   <ip> <name> <user@> <os> <status...>
+// The first data row is this machine (self); "offline" anywhere in the status
+// tail marks a peer as offline.
+fn query_tailscale_peers() -> Vec<TsPeer> {
+    let out = match Command::new("tailscale").arg("status").output() {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut peers: Vec<TsPeer> = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let f: Vec<&str> = t.split_whitespace().collect();
+        if f.len() < 4 {
+            continue;
+        }
+        // First token must look like a Tailscale CGNAT IPv4 (100.x.y.z).
+        let ip = f[0];
+        if !ip.starts_with("100.") || ip.matches('.').count() != 3 {
+            continue;
+        }
+        let online = !t.contains("offline");
+        peers.push(TsPeer {
+            name: f[1].to_string(),
+            ip: ip.to_string(),
+            os: f[3].to_string(),
+            online,
+            is_self: i == 0,
+        });
+    }
+    // Online first, then self, then alphabetical.
+    peers.sort_by(|a, b| {
+        b.online
+            .cmp(&a.online)
+            .then(b.is_self.cmp(&a.is_self))
+            .then(a.name.cmp(&b.name))
+    });
+    peers
 }
 
 // Enumerate fans from hwmon fanN_input (with fanN_label when present).
@@ -2628,6 +2692,51 @@ impl Ui {
                 let mx = n.rx_hist.iter().chain(n.tx_hist.iter()).cloned().fold(0.0_f64, f64::max);
                 nu.scale_lbl.set_text(&fmt_bitrate(mx));
                 nu.area.queue_draw();
+            }
+            // Tailnet device list — rebuild rows only when the peer set changes.
+            if let Some(grp) = &nu.ts_group {
+                let mut sig = String::new();
+                for p in g.ts_peers.iter() {
+                    sig.push_str(&p.name);
+                    sig.push('|');
+                    sig.push_str(&p.ip);
+                    sig.push('|');
+                    sig.push(if p.online { '1' } else { '0' });
+                    sig.push(';');
+                }
+                if *nu.ts_sig.borrow() != sig {
+                    *nu.ts_sig.borrow_mut() = sig;
+                    for r in nu.ts_rows.borrow_mut().drain(..) {
+                        grp.remove(&r);
+                    }
+                    let mut rows = nu.ts_rows.borrow_mut();
+                    if g.ts_peers.is_empty() {
+                        let row = adw::ActionRow::builder()
+                            .title("No devices found")
+                            .subtitle("tailscale status returned no peers")
+                            .build();
+                        grp.add(&row);
+                        rows.push(row);
+                    } else {
+                        for p in g.ts_peers.iter() {
+                            let title = if p.is_self {
+                                format!("{} (this device)", p.name)
+                            } else {
+                                p.name.clone()
+                            };
+                            let row = adw::ActionRow::builder()
+                                .title(title)
+                                .subtitle(format!("{} • {}", p.ip, p.os))
+                                .build();
+                            let badge = gtk::Label::new(Some(if p.online { "Online" } else { "Offline" }));
+                            badge.add_css_class(if p.online { "svc-run" } else { "svc-idle" });
+                            badge.set_valign(gtk::Align::Center);
+                            row.add_suffix(&badge);
+                            grp.add(&row);
+                            rows.push(row);
+                        }
+                    }
+                }
             }
         }
         for fu in self.fans.borrow().iter() {
@@ -4097,6 +4206,9 @@ struct NetUi {
     area: gtk::DrawingArea,
     scale_lbl: gtk::Label,
     lbl: std::collections::HashMap<&'static str, gtk::Label>,
+    ts_group: Option<adw::PreferencesGroup>,
+    ts_rows: RefCell<Vec<adw::ActionRow>>,
+    ts_sig: RefCell<String>,
 }
 
 // Build one network interface page (mirrors Mission Center's Network view):
@@ -4165,8 +4277,8 @@ fn build_net_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &NetInfo) -> (a
 
     let mut lbl = std::collections::HashMap::new();
     let g_stat = adw::PreferencesGroup::builder().title("Statistics").build();
-    lbl.insert("rspeed", info_row("Terima", &g_stat));
-    lbl.insert("sspeed", info_row("Kirim", &g_stat));
+    lbl.insert("rspeed", info_row("Receive", &g_stat));
+    lbl.insert("sspeed", info_row("Send", &g_stat));
     lbl.insert("trx", info_row("Total Received", &g_stat));
     lbl.insert("ttx", info_row("Total Sent", &g_stat));
     page.add(&g_stat);
@@ -4198,7 +4310,27 @@ fn build_net_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &NetInfo) -> (a
     det("IPv6 Address", &g_det, &mut lbl, "ipv6");
     page.add(&g_det);
 
-    let nu = NetUi { idx, area, scale_lbl, lbl };
+    // For the Tailscale interface, add a live tailnet device list (name + IP).
+    let ts_group = if info.iface.starts_with("tailscale") {
+        let g = adw::PreferencesGroup::builder()
+            .title("Tailnet Devices")
+            .description("Devices connected to your Tailscale network")
+            .build();
+        page.add(&g);
+        Some(g)
+    } else {
+        None
+    };
+
+    let nu = NetUi {
+        idx,
+        area,
+        scale_lbl,
+        lbl,
+        ts_group,
+        ts_rows: RefCell::new(Vec::new()),
+        ts_sig: RefCell::new(String::new()),
+    };
     (page, nu)
 }
 
