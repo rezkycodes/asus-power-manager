@@ -69,6 +69,17 @@ struct Shared {
     m_hz: String,
     m_dpi: String,
     m_onboard: bool,
+    // ── Memory (kB, f64) ──
+    mem_total: f64,
+    mem_used: f64,
+    mem_avail: f64,
+    mem_cached: f64,
+    swap_total: f64,
+    swap_used: f64,
+    committed: f64,
+    mem_pct: u32,
+    mem_hist: VecDeque<f64>,
+    swap_hist: VecDeque<f64>,
     // ── Systemd services (key "user:unit"/"sys:unit" -> state) ──
     services: std::collections::HashMap<String, String>,
 }
@@ -406,6 +417,28 @@ fn spawn_sampler(sh: Arc<Mutex<Shared>>) {
                     let m_status = rd("/sys/class/power_supply/hidpp_battery_0/status")
                         .unwrap_or_else(|| "Unknown".into());
 
+                    // Memory (/proc/meminfo, values in kB)
+                    let mut mi = std::collections::HashMap::new();
+                    if let Ok(s) = fs::read_to_string("/proc/meminfo") {
+                        for line in s.lines() {
+                            if let Some((k, v)) = line.split_once(':') {
+                                let num: f64 = v.trim().split_whitespace().next().and_then(|x| x.parse().ok()).unwrap_or(0.0);
+                                mi.insert(k.trim().to_string(), num);
+                            }
+                        }
+                    }
+                    let g_ = |k: &str| *mi.get(k).unwrap_or(&0.0);
+                    let mem_total = g_("MemTotal");
+                    let mem_avail = if mi.contains_key("MemAvailable") { g_("MemAvailable") } else { g_("MemFree") + g_("Cached") + g_("Buffers") };
+                    let mem_used = (mem_total - mem_avail).max(0.0);
+                    let mem_cached = g_("Cached") + g_("SReclaimable") + g_("Buffers");
+                    let swap_total = g_("SwapTotal");
+                    let swap_used = (swap_total - g_("SwapFree")).max(0.0);
+                    let committed = g_("Committed_AS");
+                    let mem_pct = if mem_total > 0.0 { (mem_used / mem_total * 100.0).round() as u32 } else { 0 };
+                    let mem_pct_f = if mem_total > 0.0 { mem_used / mem_total * 100.0 } else { 0.0 };
+                    let swap_pct_f = if swap_total > 0.0 { swap_used / swap_total * 100.0 } else { 0.0 };
+
                     // heavy subprocess data every 3s
                     let counts = if tick % 3 == 0 { Some(count_procs_threads()) } else { None };
                     let svc_states = if tick % 3 == 0 {
@@ -477,6 +510,22 @@ fn spawn_sampler(sh: Arc<Mutex<Shared>>) {
                         g.m_hz = m_hz;
                         g.m_dpi = m_dpi;
                         g.m_onboard = m_onboard;
+                        g.mem_total = mem_total;
+                        g.mem_used = mem_used;
+                        g.mem_avail = mem_avail;
+                        g.mem_cached = mem_cached;
+                        g.swap_total = swap_total;
+                        g.swap_used = swap_used;
+                        g.committed = committed;
+                        g.mem_pct = mem_pct;
+                        g.mem_hist.push_back(mem_pct_f);
+                        while g.mem_hist.len() > HISTORY {
+                            g.mem_hist.pop_front();
+                        }
+                        g.swap_hist.push_back(swap_pct_f);
+                        while g.swap_hist.len() > HISTORY {
+                            g.swap_hist.pop_front();
+                        }
                         if let Some((p, t)) = counts {
                             g.processes = p;
                             g.threads = t;
@@ -669,6 +718,12 @@ struct Ui {
     m_pending_dpi: Rc<Cell<Option<(u32, Instant)>>>,
     m_pending_hz: Rc<Cell<Option<(u32, Instant)>>>,
     services: Vec<SvcW>,
+    // memory
+    row_mem: adw::ActionRow,
+    mem_bar: gtk::LevelBar,
+    mem_area: gtk::DrawingArea,
+    swap_area: gtk::DrawingArea,
+    mem_lbl: std::collections::HashMap<&'static str, gtk::Label>,
 }
 
 impl Ui {
@@ -897,6 +952,24 @@ impl Ui {
                 }
             }
         }
+
+        // ── Memory ──
+        self.row_mem.set_title(&format!("Memori: {} total", fmt_gib(g.mem_total)));
+        self.row_mem.set_subtitle(&format!("Terpakai {} • {}%", fmt_gib(g.mem_used), g.mem_pct));
+        self.mem_bar.set_value(g.mem_pct as f64);
+        let mset = |k: &str, v: String| {
+            if let Some(l) = self.mem_lbl.get(k) {
+                l.set_text(&v);
+            }
+        };
+        mset("used", fmt_gib(g.mem_used));
+        mset("avail", fmt_gib(g.mem_avail));
+        mset("committed", fmt_gib(g.committed));
+        mset("cached", fmt_gib(g.mem_cached));
+        mset("swapused", if g.swap_used == 0.0 { "0".into() } else { fmt_gib(g.swap_used) });
+        mset("swapavail", fmt_gib((g.swap_total - g.swap_used).max(0.0)));
+        self.mem_area.queue_draw();
+        self.swap_area.queue_draw();
     }
 }
 
@@ -1649,6 +1722,104 @@ fn build_svc_group(
     group
 }
 
+fn fmt_gib(kb: f64) -> String {
+    let gib = kb / 1048576.0;
+    if gib < 0.1 && kb > 0.0 {
+        format!("{:.0} MiB", kb / 1024.0)
+    } else if kb == 0.0 {
+        "0".to_string()
+    } else {
+        format!("{:.1} GiB", gib)
+    }
+}
+
+fn lucide(name: &str, px: i32) -> gtk::Image {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let cands = [
+        format!("{home}/Development/asus-power-manager/rust-gui/icons/{name}.svg"),
+        format!("/usr/share/asus-tuf-cpu/icons/{name}.svg"),
+        format!("icons/{name}.svg"),
+    ];
+    for c in &cands {
+        if std::path::Path::new(c).exists() {
+            let im = gtk::Image::from_file(c);
+            im.set_pixel_size(px);
+            return im;
+        }
+    }
+    let im = gtk::Image::from_icon_name("image-missing");
+    im.set_pixel_size(px);
+    im
+}
+
+type MemPage = (
+    adw::PreferencesPage,
+    adw::ActionRow,
+    gtk::LevelBar,
+    gtk::DrawingArea,
+    gtk::DrawingArea,
+    std::collections::HashMap<&'static str, gtk::Label>,
+);
+fn build_memory_page(shared: &Arc<Mutex<Shared>>) -> MemPage {
+    let page = adw::PreferencesPage::new();
+
+    let g_head = adw::PreferencesGroup::builder().title("Memori Sistem").build();
+    let row_mem = adw::ActionRow::builder().title("Memori").subtitle("Memuat...").build();
+    let mem_bar = gtk::LevelBar::builder().min_value(0.0).max_value(100.0).valign(gtk::Align::Center).build();
+    mem_bar.set_size_request(110, 16);
+    row_mem.add_suffix(&mem_bar);
+    g_head.add(&row_mem);
+    page.add(&g_head);
+
+    let g_mem = adw::PreferencesGroup::builder().title("Penggunaan Memori (1 menit)").build();
+    let mem_area = gtk::DrawingArea::new();
+    mem_area.set_content_height(150);
+    mem_area.set_hexpand(true);
+    mem_area.add_css_class("cpu-graph-frame");
+    mem_area.set_margin_top(6);
+    mem_area.set_margin_bottom(6);
+    {
+        let sh = shared.clone();
+        mem_area.set_draw_func(move |_a, cr, w, h| {
+            if let Ok(g) = sh.lock() {
+                draw_graph(cr, w as f64, h as f64, &g.mem_hist, 100.0);
+            }
+        });
+    }
+    g_mem.add(&mem_area);
+    page.add(&g_mem);
+
+    let g_swap = adw::PreferencesGroup::builder().title("Swap (1 menit)").build();
+    let swap_area = gtk::DrawingArea::new();
+    swap_area.set_content_height(110);
+    swap_area.set_hexpand(true);
+    swap_area.add_css_class("cpu-graph-frame");
+    swap_area.set_margin_top(6);
+    swap_area.set_margin_bottom(6);
+    {
+        let sh = shared.clone();
+        swap_area.set_draw_func(move |_a, cr, w, h| {
+            if let Ok(g) = sh.lock() {
+                draw_graph(cr, w as f64, h as f64, &g.swap_hist, 100.0);
+            }
+        });
+    }
+    g_swap.add(&swap_area);
+    page.add(&g_swap);
+
+    let g_det = adw::PreferencesGroup::builder().title("Rincian").build();
+    let mut mem_lbl = std::collections::HashMap::new();
+    mem_lbl.insert("used", info_row("Sedang Dipakai (In Use)", &g_det));
+    mem_lbl.insert("avail", info_row("Tersedia (Available)", &g_det));
+    mem_lbl.insert("committed", info_row("Committed", &g_det));
+    mem_lbl.insert("cached", info_row("Cached", &g_det));
+    mem_lbl.insert("swapused", info_row("Swap Terpakai", &g_det));
+    mem_lbl.insert("swapavail", info_row("Swap Tersedia", &g_det));
+    page.add(&g_det);
+
+    (page, row_mem, mem_bar, mem_area, swap_area, mem_lbl)
+}
+
 fn build_ui(app: &adw::Application) {
     // Force full-dark scheme regardless of the system theme.
     adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
@@ -1658,6 +1829,8 @@ fn build_ui(app: &adw::Application) {
         logical,
         per_core: vec![VecDeque::from(vec![0.0; HISTORY]); logical],
         temp_hist: VecDeque::from(vec![0.0; HISTORY]),
+        mem_hist: VecDeque::from(vec![0.0; HISTORY]),
+        swap_hist: VecDeque::from(vec![0.0; HISTORY]),
         ..Default::default()
     }));
     spawn_sampler(shared.clone());
@@ -1672,11 +1845,7 @@ fn build_ui(app: &adw::Application) {
     let toolbar = adw::ToolbarView::new();
     let header = adw::HeaderBar::new();
     let stack = adw::ViewStack::new();
-    let switcher = adw::ViewSwitcher::builder()
-        .stack(&stack)
-        .policy(adw::ViewSwitcherPolicy::Wide)
-        .build();
-    header.set_title_widget(Some(&switcher));
+    header.set_title_widget(Some(&gtk::Label::new(Some("Tweaks ASUS TUF"))));
     toolbar.add_top_bar(&header);
 
     // ── CPU page ──
@@ -1684,6 +1853,11 @@ fn build_ui(app: &adw::Application) {
     let (cpu_page, row_model, util_bar, temp_area, labels) = build_cpu_page(&shared, &mut core_areas);
     let sp = stack.add_titled(&cpu_page, Some("cpu"), "CPU");
     sp.set_icon_name(Some("computer-symbolic"));
+
+    // ── Memory page (after CPU) ──
+    let (memory_page, row_mem, mem_bar, mem_area, swap_area, mem_lbl) = build_memory_page(&shared);
+    let mep = stack.add_titled(&memory_page, Some("memory"), "Memory");
+    mep.set_icon_name(Some("drive-harddisk-symbolic"));
 
     // ── Power page ──
     let power_page = adw::PreferencesPage::new();
@@ -1931,7 +2105,56 @@ fn build_ui(app: &adw::Application) {
     let svp = stack.add_titled(&services_page, Some("services"), "Layanan Sistem");
     svp.set_icon_name(Some("emblem-system-symbolic"));
 
-    toolbar.set_content(Some(&stack));
+    // ── Left sidebar (Mission Center style: icon + label, no graphs) ──
+    let sidebar = gtk::ListBox::new();
+    sidebar.add_css_class("navigation-sidebar");
+    sidebar.set_selection_mode(gtk::SelectionMode::Single);
+    let tabs = [
+        ("cpu", "CPU", "lucide-cpu"),
+        ("memory", "Memory", "lucide-memory-stick"),
+        ("power", "Daya & Baterai", "lucide-battery-charging"),
+        ("rgb", "Keyboard RGB", "lucide-keyboard"),
+        ("mouse", "Mouse Logitech", "lucide-mouse"),
+        ("services", "Layanan Sistem", "lucide-server"),
+    ];
+    for (name, label, icon) in tabs {
+        let row = gtk::ListBoxRow::new();
+        row.set_widget_name(name);
+        let bx = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        bx.set_margin_top(10);
+        bx.set_margin_bottom(10);
+        bx.set_margin_start(10);
+        bx.set_margin_end(10);
+        let img = lucide(icon, 22);
+        let lbl = gtk::Label::new(Some(label));
+        lbl.set_xalign(0.0);
+        bx.append(&img);
+        bx.append(&lbl);
+        row.set_child(Some(&bx));
+        sidebar.append(&row);
+    }
+    {
+        let stack = stack.clone();
+        sidebar.connect_row_selected(move |_lb, row| {
+            if let Some(r) = row {
+                stack.set_visible_child_name(r.widget_name().as_str());
+            }
+        });
+    }
+    if let Some(first) = sidebar.row_at_index(0) {
+        sidebar.select_row(Some(&first));
+    }
+    let side_scroll = gtk::ScrolledWindow::new();
+    side_scroll.set_child(Some(&sidebar));
+    side_scroll.set_size_request(240, -1);
+    side_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+
+    let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    hbox.append(&side_scroll);
+    hbox.append(&gtk::Separator::new(gtk::Orientation::Vertical));
+    stack.set_hexpand(true);
+    hbox.append(&stack);
+    toolbar.set_content(Some(&hbox));
     window.set_content(Some(&toolbar));
 
     // threshold switch handler (guarded against programmatic set)
@@ -2000,6 +2223,11 @@ fn build_ui(app: &adw::Application) {
         m_pending_dpi,
         m_pending_hz,
         services: svc_widgets,
+        row_mem,
+        mem_bar,
+        mem_area,
+        swap_area,
+        mem_lbl,
     });
 
     let sh = shared.clone();
