@@ -3811,6 +3811,14 @@ fn build_drive_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &DriveInfo) -
     (page, du)
 }
 
+// Classify a sidebar row into a section, for the list header func.
+fn sidebar_section(name: &str) -> &'static str {
+    match name {
+        "cpu" | "memory" | "gpu" | "fan" | "net" | "drive" | "bat" => "Pemantauan",
+        _ => "Kontrol & Sistem",
+    }
+}
+
 // Build a single sidebar navigation row (Lucide icon + label).
 fn sidebar_row(name: &str, label: &str, icon: &str) -> gtk::ListBoxRow {
     let row = gtk::ListBoxRow::new();
@@ -4508,11 +4516,7 @@ fn build_ui(app: &adw::Application) {
         .default_height(860)
         .build();
 
-    let toolbar = adw::ToolbarView::new();
-    let header = adw::HeaderBar::new();
     let stack = adw::ViewStack::new();
-    header.set_title_widget(Some(&gtk::Label::new(Some("Tweaks ASUS TUF"))));
-    toolbar.add_top_bar(&header);
 
     // ── CPU page ──
     let mut core_areas: Vec<gtk::DrawingArea> = Vec::new();
@@ -4779,7 +4783,7 @@ fn build_ui(app: &adw::Application) {
     let svp = stack.add_titled(&services_page, Some("services"), "Layanan Sistem");
     svp.set_icon_name(Some("emblem-system-symbolic"));
 
-    // ── Left sidebar (Mission Center style: icon + label, no graphs) ──
+    // ── Left sidebar (adaptive AdwNavigationSplitView, Mission Center style) ──
     let sidebar = gtk::ListBox::new();
     sidebar.add_css_class("navigation-sidebar");
     sidebar.set_selection_mode(gtk::SelectionMode::Single);
@@ -4791,33 +4795,88 @@ fn build_ui(app: &adw::Application) {
     sidebar.append(&sidebar_row("services", "Layanan Sistem", "lucide-server"));
     sidebar.append(&sidebar_row("apps", "Aplikasi & Proses", "lucide-apps"));
     sidebar.append(&sidebar_row("svcall", "Semua Layanan", "lucide-server"));
+
+    // Section headers rendered above rows via the header func — this adds no
+    // selectable rows, so the absolute index math in rebuild_dynamic (which
+    // inserts the live monitor tabs after Memory) stays correct.
+    sidebar.set_header_func(|row, before| {
+        let section = sidebar_section(row.widget_name().as_str());
+        let prev = before.map(|b| sidebar_section(b.widget_name().as_str()));
+        if prev.as_deref() != Some(section) {
+            let lbl = gtk::Label::new(Some(section));
+            lbl.add_css_class("dimmed");
+            lbl.add_css_class("caption-heading");
+            lbl.set_xalign(0.0);
+            lbl.set_margin_start(12);
+            lbl.set_margin_end(12);
+            lbl.set_margin_top(if before.is_none() { 10 } else { 16 });
+            lbl.set_margin_bottom(4);
+            row.set_header(Some(&lbl));
+        } else {
+            row.set_header(gtk::Widget::NONE);
+        }
+    });
+
+    let side_scroll = gtk::ScrolledWindow::new();
+    side_scroll.set_child(Some(&sidebar));
+    side_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    side_scroll.set_vexpand(true);
+
+    // Sidebar pane — its own header bar carries the app title.
+    let side_tv = adw::ToolbarView::new();
+    let side_header = adw::HeaderBar::new();
+    side_header.set_title_widget(Some(&adw::WindowTitle::new("Tweaks ASUS TUF", "ASUS TUF Gaming")));
+    side_tv.add_top_bar(&side_header);
+    side_tv.set_content(Some(&side_scroll));
+    let sidebar_page = adw::NavigationPage::new(&side_tv, "Menu");
+
+    // Content pane — header title tracks the selected page.
+    stack.set_hexpand(true);
+    stack.set_hhomogeneous(true);
+    stack.set_vhomogeneous(false);
+    let content_tv = adw::ToolbarView::new();
+    let content_header = adw::HeaderBar::new();
+    let content_title = adw::WindowTitle::new("CPU", "");
+    content_header.set_title_widget(Some(&content_title));
+    content_tv.add_top_bar(&content_header);
+    content_tv.set_content(Some(&stack));
+    let content_page = adw::NavigationPage::new(&content_tv, "Detail");
+
+    let split = adw::NavigationSplitView::new();
+    split.set_sidebar(Some(&sidebar_page));
+    split.set_content(Some(&content_page));
+    split.set_min_sidebar_width(210.0);
+    split.set_max_sidebar_width(260.0);
+
     {
         let stack = stack.clone();
+        let split = split.clone();
+        let content_title = content_title.clone();
         sidebar.connect_row_selected(move |_lb, row| {
             if let Some(r) = row {
-                stack.set_visible_child_name(r.widget_name().as_str());
+                let name = r.widget_name();
+                stack.set_visible_child_name(name.as_str());
+                if let Some(child) = stack.child_by_name(name.as_str()) {
+                    let title = stack.page(&child).title().unwrap_or_default();
+                    content_title.set_title(title.as_str());
+                }
+                // On narrow windows this reveals the content pane after a tap.
+                split.set_show_content(true);
             }
         });
     }
     if let Some(first) = sidebar.row_at_index(0) {
         sidebar.select_row(Some(&first));
     }
-    let side_scroll = gtk::ScrolledWindow::new();
-    side_scroll.set_child(Some(&sidebar));
-    side_scroll.set_size_request(240, -1);
-    side_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
 
-    let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    hbox.append(&side_scroll);
-    let nav_sep = gtk::Separator::new(gtk::Orientation::Vertical);
-    nav_sep.add_css_class("nav-sep");
-    hbox.append(&nav_sep);
-    stack.set_hexpand(true);
-    stack.set_hhomogeneous(true);
-    stack.set_vhomogeneous(false);
-    hbox.append(&stack);
-    toolbar.set_content(Some(&hbox));
-    window.set_content(Some(&toolbar));
+    window.set_content(Some(&split));
+
+    // Adaptive: collapse to a single pane on narrow windows (phone/split-screen).
+    if let Ok(cond) = adw::BreakpointCondition::parse("max-width: 640px") {
+        let bp = adw::Breakpoint::new(cond);
+        bp.add_setter(&split, "collapsed", Some(&true.to_value()));
+        window.add_breakpoint(bp);
+    }
 
     // threshold switch handler (guarded against programmatic set)
     let sync = Rc::new(Cell::new(false));
@@ -4839,13 +4898,17 @@ fn build_ui(app: &adw::Application) {
          scrolledwindow, textview, textview text, preferencespage, clamp, viewport { \
          background-color: #000000; } \
          headerbar { box-shadow: none; border-bottom: 1px solid rgba(255,255,255,0.06); } \
-         separator.nav-sep { background-color: #0f0f0f; background-image: none; min-width: 1px; } \
          .svc-run { color: #2ec27e; } .svc-fail { color: #e01b24; } .svc-idle { color: #5e5c64; } \
          scrolledwindow, scrolledwindow > viewport, .navigation-sidebar { border: none; box-shadow: none; } \
-         list, .boxed-list, .card, row { background-color: #0a0a0a; } \
-         .boxed-list, .card { border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; } \
-         .cpu-graph-frame { border: 1px solid rgba(41,128,236,0.55); border-radius: 6px; \
-         background-color: rgba(41,128,236,0.06); } \
+         .navigation-sidebar { background-color: #000000; } \
+         .navigation-sidebar > row { background-color: transparent; border-radius: 8px; margin: 2px 8px; padding: 2px; } \
+         .navigation-sidebar > row:hover:not(:selected) { background-color: #141414; } \
+         .navigation-sidebar > row:selected { background-color: #1c1c1c; color: #ffffff; } \
+         .boxed-list, .card { background-color: #0a0a0a; border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; } \
+         .boxed-list > row, .card > row { background-color: transparent; } \
+         .linked > togglebutton:checked { background-color: #1c1c1c; color: #ffffff; } \
+         .cpu-graph-frame { border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; \
+         background-color: #0a0a0a; } \
          scale.red-slider highlight { background: #ff3b30; } \
          scale.green-slider highlight { background: #34c759; } \
          scale.blue-slider highlight { background: #007aff; } \
