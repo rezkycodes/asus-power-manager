@@ -2794,9 +2794,6 @@ fn build_ui(app: &adw::Application) {
 
     let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     hbox.append(&side_scroll);
-    let nav_sep = gtk::Separator::new(gtk::Orientation::Vertical);
-    nav_sep.add_css_class("nav-sep");
-    hbox.append(&nav_sep);
     stack.set_hexpand(true);
     stack.set_hhomogeneous(true);
     stack.set_vhomogeneous(false);
@@ -2825,6 +2822,7 @@ fn build_ui(app: &adw::Application) {
          background-color: #000000; } \
          headerbar { box-shadow: none; border-bottom: 1px solid rgba(255,255,255,0.06); } \
          separator.nav-sep { background-color: #000000; background-image: none; min-width: 1px; } \
+         scrolledwindow, scrolledwindow > viewport, .navigation-sidebar { border: none; box-shadow: none; } \
          list, .boxed-list, .card, row { background-color: #0a0a0a; } \
          .boxed-list, .card { border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; } \
          .cpu-graph-frame { border: 1px solid rgba(41,128,236,0.55); border-radius: 6px; \
