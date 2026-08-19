@@ -62,6 +62,31 @@ struct DriveInfo {
     prev: Option<DiskPrev>,
 }
 
+#[derive(Default, Clone)]
+struct GpuInfo {
+    kind: String, // "NVIDIA"/"AMD"/"Intel"
+    name: String,
+    bus: String,
+    nvidia_index: Option<u32>,
+    drm_path: String, // sysfs device path for AMD/Intel
+    // live
+    util: f64,
+    mem_used: u64,
+    mem_total: u64,
+    temp: f64,
+    power_draw: f64,
+    power_limit: f64,
+    clock_cur: f64,     // MHz
+    clock_max: f64,     // MHz
+    mem_clock_cur: f64, // MHz
+    mem_clock_max: f64, // MHz
+    pcie: String,
+    enc_util: f64,
+    dec_util: f64,
+    util_hist: VecDeque<f64>,
+    mem_hist: VecDeque<f64>, // percent of VRAM
+}
+
 #[derive(Default)]
 struct Shared {
     ready: bool,
@@ -131,6 +156,8 @@ struct Shared {
     dimm_slots: String,
     // ── Drives (per physical disk) ──
     drives: Vec<DriveInfo>,
+    // ── GPUs (per adapter) ──
+    gpus: Vec<GpuInfo>,
     // ── Systemd services (key "user:unit"/"sys:unit" -> state) ──
     services: std::collections::HashMap<String, String>,
 }
@@ -680,6 +707,251 @@ fn refresh_part_usage(sh: &Arc<Mutex<Shared>>) {
     }
 }
 
+fn parse_dpm(s: &str) -> (f64, f64) {
+    // Lines like "2: 1600Mhz *". Returns (current-marked, max).
+    let (mut cur, mut max) = (0.0f64, 0.0f64);
+    for line in s.lines() {
+        let star = line.contains('*');
+        let t = line.split(':').nth(1).unwrap_or("").trim();
+        let num: String = t.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(v) = num.parse::<f64>() {
+            if v > max {
+                max = v;
+            }
+            if star {
+                cur = v;
+            }
+        }
+    }
+    (cur, max)
+}
+
+// Enumerate GPUs: NVIDIA via nvidia-smi, AMD/Intel via DRM sysfs. Clean-room,
+// mirrors Mission Center's GPU view data sources only.
+fn enumerate_gpus() -> Vec<GpuInfo> {
+    let mut gpus: Vec<GpuInfo> = Vec::new();
+    if let Ok(out) = Command::new("nvidia-smi")
+        .args(["--query-gpu=index,name,pci.bus_id", "--format=csv,noheader,nounits"])
+        .output()
+    {
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            let f: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
+            if f.len() >= 3 {
+                if let Ok(idx) = f[0].parse::<u32>() {
+                    gpus.push(GpuInfo {
+                        kind: "NVIDIA".into(),
+                        name: f[1].to_string(),
+                        bus: f[2].to_uppercase(),
+                        nvidia_index: Some(idx),
+                        util_hist: VecDeque::from(vec![0.0; HISTORY]),
+                        mem_hist: VecDeque::from(vec![0.0; HISTORY]),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+    }
+    if let Ok(rd) = fs::read_dir("/sys/class/drm") {
+        let mut cards: Vec<String> = rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.len() > 4 && n.starts_with("card") && n[4..].chars().all(|c| c.is_ascii_digit()))
+            .collect();
+        cards.sort();
+        for card in cards {
+            let dev = format!("/sys/class/drm/{card}/device");
+            let vendor = fs::read_to_string(format!("{dev}/vendor")).unwrap_or_default().trim().to_string();
+            let (kind, name) = match vendor.as_str() {
+                "0x1002" => ("AMD", "AMD Radeon Graphics"),
+                "0x8086" => ("Intel", "Intel Graphics"),
+                _ => continue, // NVIDIA handled above; skip other vendors
+            };
+            let bus = fs::read_link(&dev)
+                .ok()
+                .and_then(|p| p.file_name().map(|s| s.to_string_lossy().to_string()))
+                .unwrap_or_default()
+                .to_uppercase();
+            gpus.push(GpuInfo {
+                kind: kind.into(),
+                name: name.into(),
+                bus,
+                drm_path: dev,
+                util_hist: VecDeque::from(vec![0.0; HISTORY]),
+                mem_hist: VecDeque::from(vec![0.0; HISTORY]),
+                ..Default::default()
+            });
+        }
+    }
+    gpus.sort_by(|a, b| a.bus.cmp(&b.bus));
+    gpus
+}
+
+fn gather_gpus_static(sh: &Arc<Mutex<Shared>>) {
+    let g = enumerate_gpus();
+    if let Ok(mut s) = sh.lock() {
+        s.gpus = g;
+    }
+}
+
+fn gpu_signature(gpus: &[GpuInfo]) -> String {
+    let mut s = String::new();
+    for g in gpus {
+        s.push_str(&g.kind);
+        s.push(':');
+        s.push_str(&g.bus);
+        s.push(';');
+    }
+    s
+}
+
+// Periodic re-scan preserving live counters/history for surviving GPUs.
+fn refresh_gpu_list(sh: &Arc<Mutex<Shared>>) {
+    let fresh = enumerate_gpus();
+    if let Ok(mut s) = sh.lock() {
+        let mut old: std::collections::HashMap<String, GpuInfo> =
+            s.gpus.drain(..).map(|g| (g.bus.clone(), g)).collect();
+        let mut merged = Vec::with_capacity(fresh.len());
+        for mut f in fresh {
+            if let Some(o) = old.remove(&f.bus) {
+                f.util_hist = o.util_hist;
+                f.mem_hist = o.mem_hist;
+                f.util = o.util;
+                f.mem_used = o.mem_used;
+                f.mem_total = o.mem_total;
+                f.temp = o.temp;
+                f.power_draw = o.power_draw;
+                f.power_limit = o.power_limit;
+                f.clock_cur = o.clock_cur;
+                f.clock_max = o.clock_max;
+                f.mem_clock_cur = o.mem_clock_cur;
+                f.mem_clock_max = o.mem_clock_max;
+                f.pcie = o.pcie;
+                f.enc_util = o.enc_util;
+                f.dec_util = o.dec_util;
+            }
+            merged.push(f);
+        }
+        s.gpus = merged;
+    }
+}
+
+// Per-tick GPU sampling. NVIDIA (heavy nvidia-smi) only when do_nvidia; AMD/Intel
+// sysfs is cheap and read every tick.
+fn sample_gpus(sh: &Arc<Mutex<Shared>>, do_nvidia: bool) {
+    let mut nv: std::collections::HashMap<u32, [f64; 12]> = std::collections::HashMap::new();
+    let mut nv_pcie: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+    if do_nvidia {
+        if let Ok(out) = Command::new("nvidia-smi")
+            .args([
+                "--query-gpu=index,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,power.limit,clocks.sm,clocks.max.sm,clocks.mem,clocks.max.mem,utilization.encoder,utilization.decoder,pcie.link.gen.gpucurrent,pcie.link.gen.max,pcie.link.width.current",
+                "--format=csv,noheader,nounits",
+            ])
+            .output()
+        {
+            for line in String::from_utf8_lossy(&out.stdout).lines() {
+                let f: Vec<String> = line.split(',').map(|s| s.trim().to_string()).collect();
+                if f.len() < 16 {
+                    continue;
+                }
+                let idx = match f[0].parse::<u32>() {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let p = |i: usize| f.get(i).and_then(|s| s.parse::<f64>().ok()).unwrap_or(-1.0);
+                nv.insert(
+                    idx,
+                    [p(1), p(2), p(3), p(4), p(5), p(6), p(7), p(8), p(9), p(10), p(11), p(12)],
+                );
+                nv_pcie.insert(
+                    idx,
+                    format!("PCIe Gen {} x{} (maks Gen {})", f[13], f[15], f[14]),
+                );
+            }
+        }
+    }
+    if let Ok(mut s) = sh.lock() {
+        for g in s.gpus.iter_mut() {
+            if let Some(idx) = g.nvidia_index {
+                if let Some(v) = nv.get(&idx) {
+                    g.util = v[0];
+                    g.mem_used = (v[1].max(0.0) * 1048576.0) as u64;
+                    g.mem_total = (v[2].max(0.0) * 1048576.0) as u64;
+                    g.temp = v[3];
+                    g.power_draw = v[4];
+                    g.power_limit = v[5];
+                    g.clock_cur = v[6];
+                    g.clock_max = v[7];
+                    g.mem_clock_cur = v[8];
+                    g.mem_clock_max = v[9];
+                    g.enc_util = v[10];
+                    g.dec_util = v[11];
+                    if let Some(p) = nv_pcie.get(&idx) {
+                        g.pcie = p.clone();
+                    }
+                }
+            } else if !g.drm_path.is_empty() {
+                let drm = g.drm_path.clone();
+                let rf = |name: &str| {
+                    fs::read_to_string(format!("{drm}/{name}")).ok().map(|s| s.trim().to_string())
+                };
+                if let Some(u) = rf("gpu_busy_percent").and_then(|s| s.parse::<f64>().ok()) {
+                    g.util = u;
+                }
+                g.mem_used = rf("mem_info_vram_used").and_then(|s| s.parse::<u64>().ok()).unwrap_or(g.mem_used);
+                g.mem_total = rf("mem_info_vram_total").and_then(|s| s.parse::<u64>().ok()).unwrap_or(g.mem_total);
+                if let Ok(hw) = fs::read_dir(format!("{drm}/hwmon")) {
+                    if let Some(h) = hw.filter_map(|e| e.ok()).next() {
+                        let hp = h.path();
+                        if let Some(t) = fs::read_to_string(hp.join("temp1_input"))
+                            .ok()
+                            .and_then(|s| s.trim().parse::<f64>().ok())
+                        {
+                            g.temp = t / 1000.0;
+                        }
+                        let pw = fs::read_to_string(hp.join("power1_average"))
+                            .ok()
+                            .and_then(|s| s.trim().parse::<f64>().ok())
+                            .or_else(|| {
+                                fs::read_to_string(hp.join("power1_input"))
+                                    .ok()
+                                    .and_then(|s| s.trim().parse::<f64>().ok())
+                            });
+                        if let Some(p) = pw {
+                            g.power_draw = p / 1e6;
+                        }
+                    }
+                }
+                let (sc, sm) = parse_dpm(&rf("pp_dpm_sclk").unwrap_or_default());
+                g.clock_cur = sc;
+                g.clock_max = sm;
+                let (mc, mm) = parse_dpm(&rf("pp_dpm_mclk").unwrap_or_default());
+                g.mem_clock_cur = mc;
+                g.mem_clock_max = mm;
+                let sp = rf("current_link_speed").unwrap_or_default().replace(" PCIe", "");
+                let wd = rf("current_link_width").unwrap_or_default();
+                if !wd.is_empty() {
+                    g.pcie = format!("x{wd} @ {sp}");
+                }
+                g.enc_util = -1.0;
+                g.dec_util = -1.0;
+            }
+            g.util_hist.push_back(g.util.max(0.0));
+            while g.util_hist.len() > HISTORY {
+                g.util_hist.pop_front();
+            }
+            let mempct = if g.mem_total > 0 {
+                g.mem_used as f64 / g.mem_total as f64 * 100.0
+            } else {
+                0.0
+            };
+            g.mem_hist.push_back(mempct);
+            while g.mem_hist.len() > HISTORY {
+                g.mem_hist.pop_front();
+            }
+        }
+    }
+}
+
 fn spawn_sampler(sh: Arc<Mutex<Shared>>) {
     std::thread::spawn(move || {
         let logical = sh.lock().map(|g| g.logical).unwrap_or(1);
@@ -890,8 +1162,10 @@ fn spawn_sampler(sh: Arc<Mutex<Shared>>) {
                 prev = Some((ov, per));
             }
             sample_diskstats(&sh);
+            sample_gpus(&sh, tick % 3 == 0);
             if tick % 3 == 0 {
                 refresh_drive_list(&sh);
+                refresh_gpu_list(&sh);
                 refresh_part_usage(&sh);
             }
             tick += 1;
@@ -1073,13 +1347,14 @@ struct Ui {
     swap_area: gtk::DrawingArea,
     mem_lbl: std::collections::HashMap<&'static str, gtk::Label>,
     drives: RefCell<Vec<DriveUi>>,
+    gpus: RefCell<Vec<GpuUi>>,
     // hotplug rebuild handles
     shared: Arc<Mutex<Shared>>,
     stack: adw::ViewStack,
     sidebar: gtk::ListBox,
-    drive_rows: RefCell<Vec<gtk::ListBoxRow>>,
-    drive_pages: RefCell<Vec<adw::PreferencesPage>>,
-    drive_sig: RefCell<String>,
+    dyn_rows: RefCell<Vec<gtk::ListBoxRow>>,
+    dyn_pages: RefCell<Vec<adw::PreferencesPage>>,
+    dyn_sig: RefCell<String>,
 }
 
 impl Ui {
@@ -1331,11 +1606,42 @@ impl Ui {
         self.mem_area.queue_draw();
         self.swap_area.queue_draw();
 
-        // ── Drives (rebuild sidebar/pages on hotplug, then update values) ──
-        let sig = drive_signature(&g.drives);
-        if *self.drive_sig.borrow() != sig {
-            self.rebuild_drives(&g.drives);
-            *self.drive_sig.borrow_mut() = sig;
+        // ── Dynamic tabs (GPUs + drives): rebuild on change, then update ──
+        let sig = format!("{}#{}", gpu_signature(&g.gpus), drive_signature(&g.drives));
+        if *self.dyn_sig.borrow() != sig {
+            self.rebuild_dynamic(&g.gpus, &g.drives);
+            *self.dyn_sig.borrow_mut() = sig;
+        }
+        for gu in self.gpus.borrow().iter() {
+            if let Some(gp) = g.gpus.get(gu.idx) {
+                let gset = |k: &str, v: String| {
+                    if let Some(l) = gu.lbl.get(k) {
+                        l.set_text(&v);
+                    }
+                };
+                gset("util", format!("{:.0}%", gp.util.max(0.0)));
+                gset("clock", format!("{} / {}", fmt_clock(gp.clock_cur), fmt_clock(gp.clock_max)));
+                let power = if gp.power_draw <= 0.0 {
+                    "—".to_string()
+                } else if gp.power_limit > 0.0 {
+                    format!("{:.2} W / {:.0} W", gp.power_draw, gp.power_limit)
+                } else {
+                    format!("{:.2} W", gp.power_draw)
+                };
+                gset("power", power);
+                gset("mem", format!("{} / {}", fmt_bytes(gp.mem_used), fmt_bytes(gp.mem_total)));
+                gset("memclk", format!("{} / {}", fmt_clock(gp.mem_clock_cur), fmt_clock(gp.mem_clock_max)));
+                let encdec = if gp.enc_util < 0.0 {
+                    "—".to_string()
+                } else {
+                    format!("{:.0}% / {:.0}%", gp.enc_util, gp.dec_util.max(0.0))
+                };
+                gset("encdec", encdec);
+                gset("temp", if gp.temp > 0.0 { format!("{:.0} °C", gp.temp) } else { "—".into() });
+                gset("pcie", if gp.pcie.is_empty() { "—".to_string() } else { gp.pcie.clone() });
+                gu.util_area.queue_draw();
+                gu.mem_area.queue_draw();
+            }
         }
         for du in self.drives.borrow().iter() {
             if let Some(d) = g.drives.get(du.idx) {
@@ -1370,19 +1676,32 @@ impl Ui {
         }
     }
 
-    // Rebuild the per-drive sidebar rows and stack pages after a hotplug change.
-    // Drive rows live between Memory (index 1) and Power, i.e. starting at index 2.
-    fn rebuild_drives(&self, drives: &[DriveInfo]) {
-        for r in self.drive_rows.borrow().iter() {
+    // Rebuild the dynamic sidebar rows and stack pages (GPUs then drives) after a
+    // hotplug/enumeration change. They live between Memory (index 1) and Power,
+    // i.e. starting at index 2.
+    fn rebuild_dynamic(&self, gpus: &[GpuInfo], drives: &[DriveInfo]) {
+        for r in self.dyn_rows.borrow().iter() {
             self.sidebar.remove(r);
         }
-        self.drive_rows.borrow_mut().clear();
-        for p in self.drive_pages.borrow().iter() {
+        self.dyn_rows.borrow_mut().clear();
+        for p in self.dyn_pages.borrow().iter() {
             self.stack.remove(p);
         }
-        self.drive_pages.borrow_mut().clear();
+        self.dyn_pages.borrow_mut().clear();
+        self.gpus.borrow_mut().clear();
         self.drives.borrow_mut().clear();
 
+        let mut pos = 2i32; // after CPU(0), Memory(1)
+        for (i, info) in gpus.iter().enumerate() {
+            let (page, gu) = build_gpu_page(&self.shared, i, info);
+            self.stack.add_titled(&page, Some(&format!("gpu{i}")), &format!("GPU {i}"));
+            let row = sidebar_row(&format!("gpu{i}"), &format!("GPU {i} ({})", info.kind), "lucide-gpu");
+            self.sidebar.insert(&row, pos);
+            pos += 1;
+            self.dyn_rows.borrow_mut().push(row);
+            self.dyn_pages.borrow_mut().push(page);
+            self.gpus.borrow_mut().push(gu);
+        }
         for (i, info) in drives.iter().enumerate() {
             let (page, du) = build_drive_page(&self.shared, i, info);
             self.stack.add_titled(&page, Some(&format!("drive{i}")), &format!("Drive {i}"));
@@ -1391,9 +1710,10 @@ impl Ui {
                 &format!("{} {} ({})", info.kind, i, info.dev),
                 "lucide-hard-drive",
             );
-            self.sidebar.insert(&row, (2 + i) as i32);
-            self.drive_rows.borrow_mut().push(row);
-            self.drive_pages.borrow_mut().push(page);
+            self.sidebar.insert(&row, pos);
+            pos += 1;
+            self.dyn_rows.borrow_mut().push(row);
+            self.dyn_pages.borrow_mut().push(page);
             self.drives.borrow_mut().push(du);
         }
         // If the previously selected row was removed, fall back to the first tab.
@@ -2454,6 +2774,106 @@ fn sidebar_row(name: &str, label: &str, icon: &str) -> gtk::ListBoxRow {
     row
 }
 
+fn fmt_clock(mhz: f64) -> String {
+    if mhz <= 0.0 {
+        "—".into()
+    } else if mhz >= 1000.0 {
+        format!("{:.2} GHz", mhz / 1000.0)
+    } else {
+        format!("{:.0} MHz", mhz)
+    }
+}
+
+struct GpuUi {
+    idx: usize,
+    util_area: gtk::DrawingArea,
+    mem_area: gtk::DrawingArea,
+    lbl: std::collections::HashMap<&'static str, gtk::Label>,
+}
+
+// Build one GPU detail page (mirrors Mission Center's GPU view in this app's
+// card style): Utilization + Memory graphs, stats, and details.
+fn build_gpu_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &GpuInfo) -> (adw::PreferencesPage, GpuUi) {
+    let page = adw::PreferencesPage::new();
+
+    let g_head = adw::PreferencesGroup::builder().title(format!("GPU {idx}")).build();
+    let row = adw::ActionRow::builder()
+        .title(if info.name.is_empty() { info.kind.clone() } else { info.name.clone() })
+        .subtitle(info.kind.clone())
+        .build();
+    g_head.add(&row);
+    page.add(&g_head);
+
+    let g_util = adw::PreferencesGroup::builder().title("Utilisasi (1 menit)").build();
+    let util_area = gtk::DrawingArea::new();
+    util_area.set_content_height(130);
+    util_area.set_hexpand(true);
+    util_area.add_css_class("cpu-graph-frame");
+    util_area.set_margin_top(6);
+    util_area.set_margin_bottom(6);
+    {
+        let sh = shared.clone();
+        util_area.set_draw_func(move |_a, cr, w, h| {
+            if let Ok(g) = sh.lock() {
+                if let Some(d) = g.gpus.get(idx) {
+                    draw_graph(cr, w as f64, h as f64, &d.util_hist, 100.0);
+                }
+            }
+        });
+    }
+    g_util.add(&util_area);
+    page.add(&g_util);
+
+    let g_mem = adw::PreferencesGroup::builder().title("Penggunaan Memori (1 menit)").build();
+    let mem_area = gtk::DrawingArea::new();
+    mem_area.set_content_height(130);
+    mem_area.set_hexpand(true);
+    mem_area.add_css_class("cpu-graph-frame");
+    mem_area.set_margin_top(6);
+    mem_area.set_margin_bottom(6);
+    {
+        let sh = shared.clone();
+        mem_area.set_draw_func(move |_a, cr, w, h| {
+            if let Ok(g) = sh.lock() {
+                if let Some(d) = g.gpus.get(idx) {
+                    draw_graph(cr, w as f64, h as f64, &d.mem_hist, 100.0);
+                }
+            }
+        });
+    }
+    g_mem.add(&mem_area);
+    page.add(&g_mem);
+
+    let mut lbl = std::collections::HashMap::new();
+    let g_stat = adw::PreferencesGroup::builder().title("Statistik").build();
+    lbl.insert("util", info_row("Utilisasi", &g_stat));
+    lbl.insert("clock", info_row("Clock", &g_stat));
+    lbl.insert("power", info_row("Daya", &g_stat));
+    lbl.insert("mem", info_row("Memori", &g_stat));
+    lbl.insert("memclk", info_row("Kecepatan Memori", &g_stat));
+    lbl.insert("encdec", info_row("Encode / Decode", &g_stat));
+    lbl.insert("temp", info_row("Suhu", &g_stat));
+    page.add(&g_stat);
+
+    let g_det = adw::PreferencesGroup::builder().title("Detail").build();
+    let det = |t: &str, v: &str, gr: &adw::PreferencesGroup| {
+        let l = info_row(t, gr);
+        l.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+        l.set_max_width_chars(28);
+        l.set_selectable(true);
+        l.set_text(v);
+    };
+    det("Tipe", &info.kind, &g_det);
+    det("Nama", &info.name, &g_det);
+    det("Bus PCI", if info.bus.is_empty() { "—" } else { &info.bus }, &g_det);
+    let lbl_pcie = info_row("PCI Express", &g_det);
+    lbl.insert("pcie", lbl_pcie);
+    page.add(&g_det);
+
+    let gu = GpuUi { idx, util_area, mem_area, lbl };
+    (page, gu)
+}
+
 fn build_ui(app: &adw::Application) {
     // Force full-dark scheme regardless of the system theme.
     adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
@@ -2473,6 +2893,7 @@ fn build_ui(app: &adw::Application) {
         ..Default::default()
     }));
     gather_drives_static(&shared);
+    gather_gpus_static(&shared);
     spawn_sampler(shared.clone());
 
     let window = adw::ApplicationWindow::builder()
@@ -2498,21 +2919,6 @@ fn build_ui(app: &adw::Application) {
     let (memory_page, row_mem, mem_bar, mem_area, swap_area, mem_lbl) = build_memory_page(&shared);
     let mep = stack.add_titled(&memory_page, Some("memory"), "Memory");
     mep.set_icon_name(Some("drive-harddisk-symbolic"));
-
-    // ── Drive pages (after Memory, one per physical disk) ──
-    let drive_snapshot: Vec<DriveInfo> = shared.lock().map(|g| g.drives.clone()).unwrap_or_default();
-    let mut drive_uis: Vec<DriveUi> = Vec::new();
-    let mut drive_pages_vec: Vec<adw::PreferencesPage> = Vec::new();
-    let mut drive_tabs: Vec<(String, String)> = Vec::new(); // (stack name, sidebar label)
-    for (i, info) in drive_snapshot.iter().enumerate() {
-        let (dpage, du) = build_drive_page(&shared, i, info);
-        let sname = format!("drive{i}");
-        let dp = stack.add_titled(&dpage, Some(&sname), &format!("Drive {i}"));
-        dp.set_icon_name(Some("drive-harddisk-symbolic"));
-        drive_tabs.push((sname, format!("{} {} ({})", info.kind, i, info.dev)));
-        drive_uis.push(du);
-        drive_pages_vec.push(dpage);
-    }
 
     // ── Power page ──
     let power_page = adw::PreferencesPage::new();
@@ -2766,12 +3172,6 @@ fn build_ui(app: &adw::Application) {
     sidebar.set_selection_mode(gtk::SelectionMode::Single);
     sidebar.append(&sidebar_row("cpu", "CPU", "lucide-cpu"));
     sidebar.append(&sidebar_row("memory", "Memory", "lucide-memory-stick"));
-    let mut drive_rows_vec: Vec<gtk::ListBoxRow> = Vec::new();
-    for (sname, label) in &drive_tabs {
-        let row = sidebar_row(sname, label, "lucide-hard-drive");
-        sidebar.append(&row);
-        drive_rows_vec.push(row);
-    }
     sidebar.append(&sidebar_row("power", "Daya & Baterai", "lucide-battery-charging"));
     sidebar.append(&sidebar_row("rgb", "Keyboard RGB", "lucide-keyboard"));
     sidebar.append(&sidebar_row("mouse", "Mouse Logitech", "lucide-mouse"));
@@ -2877,14 +3277,25 @@ fn build_ui(app: &adw::Application) {
         mem_area,
         swap_area,
         mem_lbl,
-        drives: RefCell::new(drive_uis),
+        drives: RefCell::new(Vec::new()),
+        gpus: RefCell::new(Vec::new()),
         shared: shared.clone(),
         stack: stack.clone(),
         sidebar: sidebar.clone(),
-        drive_rows: RefCell::new(drive_rows_vec),
-        drive_pages: RefCell::new(drive_pages_vec),
-        drive_sig: RefCell::new(drive_signature(&drive_snapshot)),
+        dyn_rows: RefCell::new(Vec::new()),
+        dyn_pages: RefCell::new(Vec::new()),
+        dyn_sig: RefCell::new(String::new()),
     });
+
+    // Build the dynamic tabs (GPUs + drives) now so they appear at startup.
+    {
+        let (gs, ds) = shared
+            .lock()
+            .map(|g| (g.gpus.clone(), g.drives.clone()))
+            .unwrap_or_default();
+        ui.rebuild_dynamic(&gs, &ds);
+        *ui.dyn_sig.borrow_mut() = format!("{}#{}", gpu_signature(&gs), drive_signature(&ds));
+    }
 
     let sh = shared.clone();
     glib::timeout_add_local(Duration::from_secs(1), move || {
