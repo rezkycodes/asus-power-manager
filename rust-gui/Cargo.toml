@@ -1,0 +1,22 @@
+[package]
+name = "asus-tuf-cpu"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Realtime CPU monitor tab for Tweaks ASUS TUF (clean-room Rust/GTK4 reimplementation)"
+authors = ["Rezky P. Budihartono"]
+
+[[bin]]
+name = "asus-tuf-cpu"
+path = "src/main.rs"
+
+[dependencies]
+gtk = { package = "gtk4", version = "0.9", features = ["v4_10"] }
+adw = { package = "libadwaita", version = "0.7", features = ["v1_4"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
