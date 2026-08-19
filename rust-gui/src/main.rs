@@ -3038,7 +3038,7 @@ impl Ui {
         self.drives.borrow_mut().clear();
         *self.smart.borrow_mut() = None;
 
-        let mut pos = 2i32; // after CPU(0), Memory(1)
+        let mut pos = 3i32; // after CPU(0), Memory(1), Speed Test(2)
         if !gpus.is_empty() {
             let inner = adw::ViewStack::new();
             let mut tabs = Vec::new();
@@ -4250,7 +4250,7 @@ fn build_disk_health_page(shared: &Arc<Mutex<Shared>>, drives: &[DriveInfo]) -> 
 // Classify a sidebar row into a section, for the list header func.
 fn sidebar_section(name: &str) -> &'static str {
     match name {
-        "cpu" | "memory" | "gpu" | "fan" | "net" | "drive" | "smart" | "bat" => "Monitoring",
+        "cpu" | "memory" | "gpu" | "fan" | "net" | "drive" | "smart" | "bat" | "speedtest" => "Monitoring",
         _ => "Control & System",
     }
 }
@@ -5120,6 +5120,242 @@ fn build_ssh_page() -> adw::PreferencesPage {
 }
 
 
+// ─── Network Speed Test ───────────────────────────────────────────────────────
+fn build_speedtest_page() -> adw::PreferencesPage {
+    let page = adw::PreferencesPage::new();
+
+    let g_head = adw::PreferencesGroup::builder()
+        .title("Network Speed Test")
+        .description("Measure download, upload, and latency")
+        .build();
+
+    // Result labels
+    let lbl_dl = gtk::Label::new(Some("-- Mbps"));
+    lbl_dl.set_xalign(0.0);
+    let row_dl = adw::ActionRow::builder().title("Download").build();
+    row_dl.add_suffix(&lbl_dl);
+    g_head.add(&row_dl);
+
+    let lbl_ul = gtk::Label::new(Some("-- Mbps"));
+    lbl_ul.set_xalign(0.0);
+    let row_ul = adw::ActionRow::builder().title("Upload").build();
+    row_ul.add_suffix(&lbl_ul);
+    g_head.add(&row_ul);
+
+    let lbl_ping = gtk::Label::new(Some("-- ms"));
+    lbl_ping.set_xalign(0.0);
+    let row_ping = adw::ActionRow::builder().title("Latency (Ping)").build();
+    row_ping.add_suffix(&lbl_ping);
+    g_head.add(&row_ping);
+
+    // Status label for errors/messages
+    let lbl_status = gtk::Label::new(None);
+    lbl_status.set_xalign(0.0);
+    lbl_status.add_css_class("dimmed");
+    let row_status = adw::ActionRow::new();
+    row_status.set_child(Some(&lbl_status));
+    row_status.set_activatable(false);
+    g_head.add(&row_status);
+
+    // Run Test button
+    let btn_test = gtk::Button::builder()
+        .label("Run Test")
+        .halign(gtk::Align::Start)
+        .build();
+    btn_test.add_css_class("suggested-action");
+    let brow = adw::ActionRow::new();
+    brow.set_child(Some(&btn_test));
+    brow.set_activatable(false);
+    g_head.add(&brow);
+    page.add(&g_head);
+
+    // ── History (last 5 results) ──
+    let g_hist = adw::PreferencesGroup::builder()
+        .title("History (last 5 tests)")
+        .build();
+    let hist_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    let hist_row = adw::ActionRow::new();
+    hist_row.set_child(Some(&hist_box));
+    hist_row.set_activatable(false);
+    g_hist.add(&hist_row);
+    page.add(&g_hist);
+
+    // Shared state: history entries
+    let history: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+
+    // Connect button
+    {
+        let lbl_dl = lbl_dl.clone();
+        let lbl_ul = lbl_ul.clone();
+        let lbl_ping = lbl_ping.clone();
+        let lbl_status = lbl_status.clone();
+        let btn_test = btn_test.clone();
+        let hist_box = hist_box.clone();
+        let history = history.clone();
+
+        btn_test.connect_clicked(move |btn| {
+            btn.set_label("Testing\u{2026}");
+            btn.set_sensitive(false);
+            lbl_status.set_text("");
+            lbl_dl.set_text("measuring...");
+            lbl_ul.set_text("measuring...");
+            lbl_ping.set_text("measuring...");
+
+            let result: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+            let result2 = result.clone();
+
+            // Run speed test in background thread
+            std::thread::spawn(move || {
+                let output = if let Ok(st) = Command::new("which").arg("speedtest").output() {
+                    if st.status.success() {
+                        // Use speedtest CLI (Ookla)
+                        Command::new("speedtest")
+                            .arg("--simple")
+                            .output()
+                            .ok()
+                            .map(|o| {
+                                let raw = String::from_utf8_lossy(&o.stdout).to_string();
+                                parse_speedtest_cli(&raw)
+                            })
+                    } else if let Ok(sc) = Command::new("which").arg("speedtest-cli").output() {
+                        if sc.status.success() {
+                            Command::new("speedtest-cli")
+                                .arg("--simple")
+                                .output()
+                                .ok()
+                                .map(|o| {
+                                    let raw = String::from_utf8_lossy(&o.stdout).to_string();
+                                    parse_speedtest_cli(&raw)
+                                })
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                let final_result = output.unwrap_or_else(|| {
+                    // Fallback: run our script
+                    let sp = script_path("asus-speedtest.sh");
+                    match Command::new("bash").arg(&sp).output() {
+                        Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
+                        Err(_) => "TOOL_MISSING=1\n".to_string(),
+                    }
+                });
+
+                if let Ok(mut r) = result2.lock() {
+                    *r = Some(final_result);
+                }
+            });
+
+            // Poll result on main thread
+            let lbl_dl2 = lbl_dl.clone();
+            let lbl_ul2 = lbl_ul.clone();
+            let lbl_ping2 = lbl_ping.clone();
+            let lbl_status2 = lbl_status.clone();
+            let btn2 = btn.clone();
+            let hist_box2 = hist_box.clone();
+            let history2 = history.clone();
+
+            glib::timeout_add_local(Duration::from_millis(200), move || {
+                if let Ok(mut guard) = result.lock() {
+                    if let Some(text) = guard.take() {
+                        let mut dl = String::new();
+                        let mut ul = String::new();
+                        let mut ping = String::new();
+                        let mut missing = false;
+
+                        for line in text.lines() {
+                            if let Some(v) = line.strip_prefix("DOWNLOAD_MBPS=") {
+                                dl = v.trim().to_string();
+                            } else if let Some(v) = line.strip_prefix("UPLOAD_MBPS=") {
+                                ul = v.trim().to_string();
+                            } else if let Some(v) = line.strip_prefix("PING_MS=") {
+                                ping = v.trim().to_string();
+                            } else if line.contains("TOOL_MISSING=1") {
+                                missing = true;
+                            }
+                        }
+
+                        if missing {
+                            lbl_status2.set_text("No speed test tool or network available.");
+                            lbl_dl2.set_text("-- Mbps");
+                            lbl_ul2.set_text("-- Mbps");
+                            lbl_ping2.set_text("-- ms");
+                        } else {
+                            let dl_disp = if dl.is_empty() { "N/A".into() } else { format!("{dl} Mbps") };
+                            let ul_disp = if ul.is_empty() { "N/A".into() } else { format!("{ul} Mbps") };
+                            let ping_disp = if ping.is_empty() { "N/A".into() } else { format!("{ping} ms") };
+                            lbl_dl2.set_text(&dl_disp);
+                            lbl_ul2.set_text(&ul_disp);
+                            lbl_ping2.set_text(&ping_disp);
+
+                            // Add to history
+                            let now = glib::DateTime::now_local().map(|d| d.format("%H:%M:%S").unwrap_or_default().to_string()).unwrap_or_else(|_| "??:??:??".into());
+                            let entry = format!("[{now}]  \u{2193}{dl_disp}  \u{2191}{ul_disp}  Ping: {ping_disp}");
+                            let mut h = history2.borrow_mut();
+                            h.push(entry);
+                            if h.len() > 5 {
+                                h.remove(0);
+                            }
+                            // Rebuild history display
+                            while let Some(child) = hist_box2.first_child() {
+                                hist_box2.remove(&child);
+                            }
+                            for e in h.iter() {
+                                let l = gtk::Label::new(Some(e));
+                                l.set_xalign(0.0);
+                                l.add_css_class("monospace");
+                                hist_box2.append(&l);
+                            }
+                        }
+
+                        btn2.set_label("Run Test");
+                        btn2.set_sensitive(true);
+                        return glib::ControlFlow::Break;
+                    }
+                }
+                glib::ControlFlow::Continue
+            });
+        });
+    }
+
+    page
+}
+
+/// Parse output from `speedtest --simple` / `speedtest-cli --simple`.
+/// Example output:
+///   Ping: 12.345 ms
+///   Download: 94.52 Mbit/s
+///   Upload: 45.23 Mbit/s
+fn parse_speedtest_cli(raw: &str) -> String {
+    let mut dl = String::new();
+    let mut ul = String::new();
+    let mut ping = String::new();
+    for line in raw.lines() {
+        let lower = line.to_lowercase();
+        if lower.starts_with("download:") {
+            // Extract number before "mbit" or "mbps"
+            if let Some(num) = line.split_whitespace().nth(1) {
+                dl = num.to_string();
+            }
+        } else if lower.starts_with("upload:") {
+            if let Some(num) = line.split_whitespace().nth(1) {
+                ul = num.to_string();
+            }
+        } else if lower.starts_with("ping:") {
+            if let Some(num) = line.split_whitespace().nth(1) {
+                ping = num.to_string();
+            }
+        }
+    }
+    format!("DOWNLOAD_MBPS={dl}\nUPLOAD_MBPS={ul}\nPING_MS={ping}\n")
+}
+
+
 // ─── System Log Viewer ────────────────────────────────────────────────────────
 fn build_logs_page() -> adw::PreferencesPage {
     let page = adw::PreferencesPage::new();
@@ -5406,6 +5642,10 @@ fn build_ui(app: &adw::Application) {
     let logs_page = build_logs_page();
     stack.add_titled(&logs_page, Some("logs"), "System Logs");
 
+    // ── Network Speed Test page ──
+    let speedtest_page = build_speedtest_page();
+    stack.add_titled(&speedtest_page, Some("speedtest"), "Speed Test");
+
     // ── Power page ──
     let power_page = adw::PreferencesPage::new();
 
@@ -5658,6 +5898,7 @@ fn build_ui(app: &adw::Application) {
     sidebar.set_selection_mode(gtk::SelectionMode::Single);
     sidebar.append(&sidebar_row("cpu", "CPU", "lucide-cpu"));
     sidebar.append(&sidebar_row("memory", "Memory", "lucide-memory-stick"));
+    sidebar.append(&sidebar_row("speedtest", "Speed Test", "lucide-gauge"));
     sidebar.append(&sidebar_row("power", "Power & Battery", "lucide-battery-charging"));
     sidebar.append(&sidebar_row("rgb", "Keyboard RGB", "lucide-keyboard"));
     sidebar.append(&sidebar_row("mouse", "Mouse Logitech", "lucide-mouse"));
