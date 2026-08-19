@@ -69,6 +69,8 @@ struct Shared {
     m_hz: String,
     m_dpi: String,
     m_onboard: bool,
+    // ── Systemd services (key "user:unit"/"sys:unit" -> state) ──
+    services: std::collections::HashMap<String, String>,
 }
 
 // ───────────────────────── helpers ─────────────────────────
@@ -406,6 +408,18 @@ fn spawn_sampler(sh: Arc<Mutex<Shared>>) {
 
                     // heavy subprocess data every 3s
                     let counts = if tick % 3 == 0 { Some(count_procs_threads()) } else { None };
+                    let svc_states = if tick % 3 == 0 {
+                        let mut m = std::collections::HashMap::new();
+                        for (u, _, _) in USER_SVC {
+                            m.insert(format!("user:{u}"), systemctl_active(true, u));
+                        }
+                        for (u, _, _) in SYS_SVC {
+                            m.insert(format!("sys:{u}"), systemctl_active(false, u));
+                        }
+                        Some(m)
+                    } else {
+                        None
+                    };
                     let up = if tick % 3 == 0 { Some(upower_battery()) } else { None };
                     let gpu = if tick % 3 == 0 { nvidia_telemetry() } else { None };
                     let gpu_tel = gpu.map(|(t, p, v, ps)| {
@@ -467,6 +481,9 @@ fn spawn_sampler(sh: Arc<Mutex<Shared>>) {
                             g.processes = p;
                             g.threads = t;
                         }
+                        if let Some(m) = svc_states {
+                            g.services = m;
+                        }
                         if let Some((er, cap, ts)) = up {
                             g.energy_rate = er;
                             g.health_cap = cap;
@@ -521,6 +538,51 @@ fn run_user(args: Vec<String>) {
             .stderr(std::process::Stdio::null())
             .status();
     });
+}
+
+// Systemd services (unit, title, description)
+const USER_SVC: [(&str, &str, &str); 6] = [
+    ("9router.service", "9router AI Proxy Gateway", "Port 20128"),
+    ("agentmemory.service", "AgentMemory Daemon", "Port 3111"),
+    ("hermes-gateway.service", "Hermes Agent Gateway", "Telegram & Messaging"),
+    ("hermes-webui.service", "Hermes Web UI", "Port 8787"),
+    ("code-server.service", "VS Code Remote Server", "Port 8080"),
+    ("ts-forward-watch.service", "Tailscale Port Forwarder", "Auto forward ports"),
+];
+const SYS_SVC: [(&str, &str, &str); 5] = [
+    ("ollama.service", "Ollama Local LLM Engine", "Port 11434"),
+    ("tailscaled.service", "Tailscale Mesh VPN", "Remote VPN"),
+    ("sshd.service", "OpenSSH Server", "Port 22"),
+    ("docker.service", "Docker Container Engine", "Runtime kontainer"),
+    ("battery-charge-threshold.service", "Batas Baterai 80% Service", "Proteksi hardware"),
+];
+
+fn systemctl_active(is_user: bool, unit: &str) -> String {
+    let mut cmd = Command::new("systemctl");
+    if is_user {
+        cmd.arg("--user");
+    }
+    cmd.arg("is-active").arg(unit);
+    match cmd.output() {
+        Ok(o) => {
+            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if s.is_empty() {
+                "inactive".into()
+            } else {
+                s
+            }
+        }
+        Err(_) => "unknown".into(),
+    }
+}
+
+#[allow(dead_code)]
+struct SvcW {
+    key: String,
+    is_user: bool,
+    unit: String,
+    badge: gtk::Label,
+    toggle: gtk::Button,
 }
 
 // ───────────────────────── drawing ─────────────────────────
@@ -606,6 +668,7 @@ struct Ui {
     m_sync: Rc<Cell<bool>>,
     m_pending_dpi: Rc<Cell<Option<(u32, Instant)>>>,
     m_pending_hz: Rc<Cell<Option<(u32, Instant)>>>,
+    services: Vec<SvcW>,
 }
 
 impl Ui {
@@ -795,6 +858,44 @@ impl Ui {
             self.m_sync.set(true);
             self.switch_onboard.set_active(g.m_onboard);
             self.m_sync.set(false);
+        }
+
+        // ── Services ──
+        for s in &self.services {
+            let state = match g.services.get(&s.key) {
+                Some(v) => v.as_str(),
+                None => continue,
+            };
+            s.badge.remove_css_class("badge-run");
+            s.badge.remove_css_class("badge-stop");
+            s.badge.remove_css_class("badge-fail");
+            s.toggle.remove_css_class("destructive-action");
+            s.toggle.remove_css_class("suggested-action");
+            match state {
+                "active" => {
+                    s.badge.set_text("Aktif");
+                    s.badge.add_css_class("badge-run");
+                    s.toggle.set_label("Stop");
+                    s.toggle.add_css_class("destructive-action");
+                }
+                "failed" => {
+                    s.badge.set_text("Gagal");
+                    s.badge.add_css_class("badge-fail");
+                    s.toggle.set_label("Start");
+                    s.toggle.add_css_class("suggested-action");
+                }
+                "unknown" => {
+                    s.badge.set_text("Unknown");
+                    s.badge.add_css_class("badge-stop");
+                    s.toggle.set_label("Start");
+                }
+                _ => {
+                    s.badge.set_text("Mati");
+                    s.badge.add_css_class("badge-stop");
+                    s.toggle.set_label("Start");
+                    s.toggle.add_css_class("suggested-action");
+                }
+            }
         }
     }
 }
@@ -1313,6 +1414,71 @@ fn build_rgb_page() -> adw::PreferencesPage {
     page
 }
 
+fn build_svc_group(
+    shared: &Arc<Mutex<Shared>>,
+    defs: &[(&str, &str, &str)],
+    is_user: bool,
+    group_title: &str,
+    out: &mut Vec<SvcW>,
+) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::builder().title(group_title).build();
+    for (unit, title, sub) in defs.iter() {
+        let row = adw::ActionRow::builder()
+            .title(*title)
+            .subtitle(&format!("Unit: {} • {}", unit, sub).replace('&', "&amp;"))
+            .build();
+        let bx = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        bx.set_valign(gtk::Align::Center);
+        let badge = gtk::Label::new(Some("Memuat"));
+        badge.add_css_class("badge-stop");
+        let toggle = seg_button("Mulai");
+        let restart = seg_button("Restart");
+        let key = format!("{}:{}", if is_user { "user" } else { "sys" }, unit);
+        {
+            let sh = shared.clone();
+            let unit = unit.to_string();
+            let key = key.clone();
+            toggle.connect_clicked(move |_| {
+                let active = sh
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.services.get(&key).cloned())
+                    .map(|s| s == "active")
+                    .unwrap_or(false);
+                let action = if active { "stop" } else { "start" };
+                if is_user {
+                    run_user(vec!["systemctl".into(), "--user".into(), action.into(), unit.clone()]);
+                } else {
+                    run_priv(vec!["systemctl".into(), action.into(), unit.clone()]);
+                }
+            });
+        }
+        {
+            let unit = unit.to_string();
+            restart.connect_clicked(move |_| {
+                if is_user {
+                    run_user(vec!["systemctl".into(), "--user".into(), "restart".into(), unit.clone()]);
+                } else {
+                    run_priv(vec!["systemctl".into(), "restart".into(), unit.clone()]);
+                }
+            });
+        }
+        bx.append(&badge);
+        bx.append(&toggle);
+        bx.append(&restart);
+        row.add_suffix(&bx);
+        group.add(&row);
+        out.push(SvcW {
+            key,
+            is_user,
+            unit: unit.to_string(),
+            badge,
+            toggle,
+        });
+    }
+    group
+}
+
 fn build_ui(app: &adw::Application) {
     let logical = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     let shared = Arc::new(Mutex::new(Shared {
@@ -1570,6 +1736,26 @@ fn build_ui(app: &adw::Application) {
     let mp = stack.add_titled(&mouse_page, Some("mouse"), "Mouse Logitech");
     mp.set_icon_name(Some("input-mouse-symbolic"));
 
+    // ── Layanan Sistem page ──
+    let services_page = adw::PreferencesPage::new();
+    let mut svc_widgets: Vec<SvcW> = Vec::new();
+    services_page.add(&build_svc_group(
+        &shared,
+        &USER_SVC,
+        true,
+        "Layanan AI &amp; Pengguna (User Daemons)",
+        &mut svc_widgets,
+    ));
+    services_page.add(&build_svc_group(
+        &shared,
+        &SYS_SVC,
+        false,
+        "Layanan Infrastruktur Sistem (Root)",
+        &mut svc_widgets,
+    ));
+    let svp = stack.add_titled(&services_page, Some("services"), "Layanan Sistem");
+    svp.set_icon_name(Some("emblem-system-symbolic"));
+
     toolbar.set_content(Some(&stack));
     window.set_content(Some(&toolbar));
 
@@ -1593,7 +1779,10 @@ fn build_ui(app: &adw::Application) {
          background-color: rgba(41,128,236,0.06); } \
          scale.red-slider highlight { background: #ff3b30; } \
          scale.green-slider highlight { background: #34c759; } \
-         scale.blue-slider highlight { background: #007aff; }",
+         scale.blue-slider highlight { background: #007aff; } \
+         .badge-run { background-color: #2ec27e; color: #fff; border-radius: 6px; padding: 2px 10px; font-weight: bold; } \
+         .badge-stop { background-color: #5e5c64; color: #fff; border-radius: 6px; padding: 2px 10px; font-weight: bold; } \
+         .badge-fail { background-color: #e01b24; color: #fff; border-radius: 6px; padding: 2px 10px; font-weight: bold; }",
     );
     if let Some(display) = gtk::gdk::Display::default() {
         gtk::style_context_add_provider_for_display(&display, &provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
@@ -1629,6 +1818,7 @@ fn build_ui(app: &adw::Application) {
         m_sync,
         m_pending_dpi,
         m_pending_hz,
+        services: svc_widgets,
     });
 
     let sh = shared.clone();
