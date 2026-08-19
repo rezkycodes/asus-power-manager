@@ -1954,7 +1954,7 @@ fn build_ui(app: &adw::Application) {
          scrolledwindow, textview, textview text, preferencespage, clamp, viewport { \
          background-color: #000000; } \
          headerbar { box-shadow: none; border-bottom: 1px solid rgba(255,255,255,0.06); } \
-         list, .boxed-list, .card, row { background-color: #000000; } \
+         list, .boxed-list, .card, row { background-color: #0a0a0a; } \
          .boxed-list, .card { border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; } \
          .cpu-graph-frame { border: 1px solid rgba(41,128,236,0.55); border-radius: 6px; \
          background-color: rgba(41,128,236,0.06); } \
