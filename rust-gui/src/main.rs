@@ -151,6 +151,7 @@ struct ProcInfo {
     swap_kb: u64,
     io_bps: f64,
     io_known: bool,
+    ports: String,
 }
 
 #[derive(Default, Clone)]
@@ -1049,6 +1050,35 @@ fn read_total_jiffies() -> u64 {
 
 // Sample all processes: CPU% (over the interval), RSS and swap. `prev`/`prev_total`
 // persist between samples for the CPU delta. Returns (sorted list, total count).
+// Map pid -> comma-joined listening ports via `ss` (own processes; root-owned
+// sockets omit the pid unless we are root).
+fn listening_ports() -> std::collections::HashMap<u32, Vec<u16>> {
+    let mut m: std::collections::HashMap<u32, Vec<u16>> = std::collections::HashMap::new();
+    if let Ok(o) = Command::new("ss").args(["-H", "-tulpn"]).output() {
+        for line in String::from_utf8_lossy(&o.stdout).lines() {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            if f.len() < 5 {
+                continue;
+            }
+            let port = f[4].rsplit(':').next().and_then(|p| p.parse::<u16>().ok());
+            let port = match port {
+                Some(p) => p,
+                None => continue,
+            };
+            for cap in line.split("pid=").skip(1) {
+                let digits: String = cap.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if let Ok(pid) = digits.parse::<u32>() {
+                    let e = m.entry(pid).or_default();
+                    if !e.contains(&port) {
+                        e.push(port);
+                    }
+                }
+            }
+        }
+    }
+    m
+}
+
 fn sample_procs(
     prev: &mut std::collections::HashMap<u32, u64>,
     prev_total: &mut u64,
@@ -1058,6 +1088,7 @@ fn sample_procs(
     let dtotal = total.saturating_sub(*prev_total).max(1) as f64;
     let mut cur: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
     let mut io_cur: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+    let port_map = listening_ports();
     let mut out: Vec<ProcInfo> = Vec::new();
     let mut count = 0usize;
     if let Ok(rd) = fs::read_dir("/proc") {
@@ -1115,7 +1146,15 @@ fn sample_procs(
                 io_bps = d / 3.0; // sampled ~every 3s
                 io_cur.insert(pid, bytes);
             }
-            out.push(ProcInfo { pid, name, cpu, rss_kb: rss, swap_kb: swap, io_bps, io_known });
+            let ports = port_map
+                .get(&pid)
+                .map(|v| {
+                    let mut s = v.clone();
+                    s.sort_unstable();
+                    s.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
+                })
+                .unwrap_or_default();
+            out.push(ProcInfo { pid, name, cpu, rss_kb: rss, swap_kb: swap, io_bps, io_known, ports });
         }
     }
     *prev = cur;
@@ -2335,9 +2374,19 @@ impl Ui {
         // ── Aplikasi & Proses ──
         self.apps.row_hdr.set_subtitle(&format!("{} proses berjalan", g.proc_total));
         {
+            let q = self.apps.query.borrow().clone();
+            let matches = |p: &ProcInfo| {
+                q.is_empty()
+                    || p.name.to_lowercase().contains(&q)
+                    || p.pid.to_string().contains(&q)
+                    || p.ports.contains(&q)
+            };
+            let filtered: Vec<&ProcInfo> = g.procs.iter().filter(|p| matches(p)).take(200).collect();
             let mut sig = String::with_capacity(1024);
-            for p in g.procs.iter().take(120) {
-                sig.push_str(&format!("{}:{:.0}:{}:{:.0};", p.pid, p.cpu, p.rss_kb, p.io_bps));
+            sig.push_str(&q);
+            sig.push('|');
+            for p in &filtered {
+                sig.push_str(&format!("{}:{:.0}:{}:{:.0}:{};", p.pid, p.cpu, p.rss_kb, p.io_bps, p.ports));
             }
             if *self.apps.sig.borrow() != sig {
                 *self.apps.sig.borrow_mut() = sig;
@@ -2345,7 +2394,7 @@ impl Ui {
                     self.apps.list.remove(&r);
                 }
                 let want = self.apps.sel.get();
-                for p in g.procs.iter().take(120) {
+                for p in filtered.iter().take(150) {
                     let row = gtk::ListBoxRow::new();
                     row.set_widget_name(&p.pid.to_string());
                     let bx = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -2368,11 +2417,16 @@ impl Ui {
                         l
                     };
                     bx.append(&cell(p.name.clone(), 0, 0.0, false));
-                    bx.append(&cell(p.pid.to_string(), 70, 1.0, true));
-                    bx.append(&cell(format!("{:.0}%", p.cpu), 60, 1.0, false));
-                    bx.append(&cell(fmt_kib(p.rss_kb), 90, 1.0, false));
-                    bx.append(&cell(if p.swap_kb == 0 { "0".into() } else { fmt_kib(p.swap_kb) }, 90, 1.0, true));
-                    bx.append(&cell(if p.io_known { fmt_rate(p.io_bps) } else { "—".into() }, 90, 1.0, true));
+                    bx.append(&cell(p.pid.to_string(), 56, 1.0, true));
+                    bx.append(&cell(format!("{:.0}%", p.cpu), 48, 1.0, false));
+                    bx.append(&cell(fmt_kib(p.rss_kb), 78, 1.0, false));
+                    bx.append(&cell(if p.swap_kb == 0 { "0".into() } else { fmt_kib(p.swap_kb) }, 66, 1.0, true));
+                    bx.append(&cell(if p.io_known { fmt_rate(p.io_bps) } else { "—".into() }, 78, 1.0, true));
+                    let port_cell = cell(if p.ports.is_empty() { "—".into() } else { p.ports.clone() }, 96, 1.0, false);
+                    if !p.ports.is_empty() {
+                        port_cell.add_css_class("svc-run");
+                    }
+                    bx.append(&port_cell);
                     row.set_child(Some(&bx));
                     self.apps.list.append(&row);
                     if want == Some(p.pid) {
@@ -4153,6 +4207,7 @@ struct AppsUi {
     row_hdr: adw::ActionRow,
     list: gtk::ListBox,
     sel: Rc<Cell<Option<u32>>>,
+    query: Rc<RefCell<String>>,
     sig: RefCell<String>,
 }
 
@@ -4190,6 +4245,19 @@ fn build_apps_page(_shared: &Arc<Mutex<Shared>>) -> (adw::PreferencesPage, AppsU
     page.add(&g_head);
 
     let g_tbl = adw::PreferencesGroup::builder().title("Proses (menurut pemakaian CPU)").build();
+    let query: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
+    let search = gtk::SearchEntry::new();
+    search.set_placeholder_text(Some("Cari nama / PID / port..."));
+    search.set_hexpand(true);
+    search.set_margin_start(4);
+    search.set_margin_end(4);
+    search.set_margin_bottom(6);
+    {
+        let query = query.clone();
+        search.connect_search_changed(move |e| {
+            *query.borrow_mut() = e.text().to_string().to_lowercase();
+        });
+    }
     let col = |t: &str, w: i32, xalign: f32| {
         let l = gtk::Label::new(Some(t));
         l.set_xalign(xalign);
@@ -4207,11 +4275,12 @@ fn build_apps_page(_shared: &Arc<Mutex<Shared>>) -> (adw::PreferencesPage, AppsU
     hdr.set_margin_top(6);
     hdr.set_margin_bottom(6);
     hdr.append(&col("Nama", 0, 0.0));
-    hdr.append(&col("PID", 70, 1.0));
-    hdr.append(&col("CPU", 60, 1.0));
-    hdr.append(&col("Memori", 90, 1.0));
-    hdr.append(&col("Swap", 90, 1.0));
-    hdr.append(&col("Drive", 90, 1.0));
+    hdr.append(&col("PID", 56, 1.0));
+    hdr.append(&col("CPU", 48, 1.0));
+    hdr.append(&col("Memori", 78, 1.0));
+    hdr.append(&col("Swap", 66, 1.0));
+    hdr.append(&col("Drive", 78, 1.0));
+    hdr.append(&col("Port", 96, 1.0));
 
     let list = gtk::ListBox::new();
     list.add_css_class("boxed-list");
@@ -4228,12 +4297,13 @@ fn build_apps_page(_shared: &Arc<Mutex<Shared>>) -> (adw::PreferencesPage, AppsU
     sw.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
 
     let vb = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    vb.append(&search);
     vb.append(&hdr);
     vb.append(&sw);
     g_tbl.add(&vb);
     page.add(&g_tbl);
 
-    let ui = AppsUi { row_hdr, list, sel, sig: RefCell::new(String::new()) };
+    let ui = AppsUi { row_hdr, list, sel, query, sig: RefCell::new(String::new()) };
     (page, ui)
 }
 
