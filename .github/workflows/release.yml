@@ -1,0 +1,61 @@
+name: Build & Release Packages
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build .deb / .rpm (Fedora container)
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:41
+    steps:
+      - name: Install build dependencies
+        run: |
+          dnf -y install \
+            cargo rust \
+            gtk4-devel libadwaita-devel \
+            gcc pkgconf-pkg-config \
+            rpm-build dpkg \
+            git tar gzip findutils
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Mark workspace safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Build .deb and .rpm
+        run: ./build-packages.sh
+
+      - name: Build source tarball
+        run: |
+          VER=$(grep -m1 '^version' rust-gui/Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          git archive --format=tar.gz \
+            --prefix=asus-power-manager-${VER}/ \
+            -o dist/asus-power-manager-${VER}-source.tar.gz HEAD
+
+      - name: List artifacts
+        run: ls -lh dist/
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: dist/*
+
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" dist/* --repo "$GITHUB_REPOSITORY" --clobber \
+            || gh release create "${GITHUB_REF_NAME}" dist/* --repo "$GITHUB_REPOSITORY" \
+                 --title "${GITHUB_REF_NAME} — Tweaks ASUS TUF" \
+                 --notes "Automated build for ${GITHUB_REF_NAME}."
