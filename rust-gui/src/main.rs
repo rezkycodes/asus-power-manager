@@ -4655,6 +4655,166 @@ fn build_services_all_page() -> (adw::PreferencesPage, SvcAllUi) {
     (page, ui)
 }
 
+#[derive(Default, Clone)]
+struct SshHost {
+    alias: String,
+    hostname: String,
+    user: String,
+    port: String,
+    identity: String,
+}
+
+// Parse ~/.ssh/config into connectable host entries. Wildcard patterns and
+// URL-looking "hosts" are skipped (they are not real ssh destinations).
+fn parse_ssh_hosts() -> Vec<SshHost> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let text = match fs::read_to_string(format!("{home}/.ssh/config")) {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+    let mut hosts: Vec<SshHost> = Vec::new();
+    let mut cur: Option<SshHost> = None;
+    let mut skip = false;
+    let flush = |hosts: &mut Vec<SshHost>, cur: &mut Option<SshHost>, skip: bool| {
+        if let Some(h) = cur.take() {
+            if !skip && !h.alias.is_empty() {
+                hosts.push(h);
+            }
+        }
+    };
+    for line in text.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        let (key, val) = match t.split_once(char::is_whitespace) {
+            Some((k, v)) => (k.to_ascii_lowercase(), v.trim()),
+            None => (t.to_ascii_lowercase(), ""),
+        };
+        match key.as_str() {
+            "host" => {
+                flush(&mut hosts, &mut cur, skip);
+                let alias = val.split_whitespace().next().unwrap_or("").to_string();
+                // Skip wildcard patterns and URL-looking pseudo-hosts.
+                skip = alias.is_empty()
+                    || alias.contains('*')
+                    || alias.contains('?')
+                    || alias.contains("://");
+                cur = Some(SshHost { alias, ..Default::default() });
+            }
+            "hostname" => {
+                if let Some(h) = cur.as_mut() {
+                    h.hostname = val.to_string();
+                }
+            }
+            "user" => {
+                if let Some(h) = cur.as_mut() {
+                    h.user = val.to_string();
+                }
+            }
+            "port" => {
+                if let Some(h) = cur.as_mut() {
+                    h.port = val.to_string();
+                }
+            }
+            "identityfile" => {
+                if let Some(h) = cur.as_mut() {
+                    h.identity = val.to_string();
+                }
+            }
+            _ => {}
+        }
+    }
+    flush(&mut hosts, &mut cur, skip);
+    hosts
+}
+
+// SSH manager tab: lists ~/.ssh/config hosts; Connect opens ssh in a new
+// Ghostty window (`ghostty -e ssh <alias>`), so ssh_config resolves the
+// user/port/identity automatically.
+fn build_ssh_page() -> adw::PreferencesPage {
+    let page = adw::PreferencesPage::new();
+
+    let g_head = adw::PreferencesGroup::builder()
+        .title("SSH Connections")
+        .description("Hosts from ~/.ssh/config — Connect opens a new Ghostty terminal")
+        .build();
+    let btn_term = gtk::Button::builder().label("Open Terminal").valign(gtk::Align::Center).build();
+    btn_term.connect_clicked(|_| run_user(vec!["ghostty".into()]));
+    g_head.set_header_suffix(Some(&btn_term));
+    page.add(&g_head);
+
+    let g_list = adw::PreferencesGroup::builder().title("Configured Hosts").build();
+    page.add(&g_list);
+
+    // (Re)build the host rows from ssh config.
+    let rows: Rc<RefCell<Vec<adw::ActionRow>>> = Rc::new(RefCell::new(Vec::new()));
+    let rebuild = {
+        let g_list = g_list.clone();
+        let rows = rows.clone();
+        move || {
+            for r in rows.borrow_mut().drain(..) {
+                g_list.remove(&r);
+            }
+            let hosts = parse_ssh_hosts();
+            let mut rlist = rows.borrow_mut();
+            if hosts.is_empty() {
+                let row = adw::ActionRow::builder()
+                    .title("No hosts found")
+                    .subtitle("Add entries to ~/.ssh/config")
+                    .build();
+                g_list.add(&row);
+                rlist.push(row);
+                return;
+            }
+            for h in hosts {
+                let mut sub = String::new();
+                if !h.user.is_empty() {
+                    sub.push_str(&h.user);
+                    sub.push('@');
+                }
+                sub.push_str(if h.hostname.is_empty() { &h.alias } else { &h.hostname });
+                if !h.port.is_empty() && h.port != "22" {
+                    sub.push(':');
+                    sub.push_str(&h.port);
+                }
+                let row = adw::ActionRow::builder().title(&h.alias).subtitle(&sub).build();
+                row.add_prefix(&lucide("lucide-terminal", 20));
+
+                let btn = gtk::Button::builder()
+                    .label("Connect")
+                    .valign(gtk::Align::Center)
+                    .build();
+                btn.add_css_class("suggested-action");
+                {
+                    let alias = h.alias.clone();
+                    btn.connect_clicked(move |_| {
+                        run_user(vec!["ghostty".into(), "-e".into(), "ssh".into(), alias.clone()]);
+                    });
+                }
+                row.add_suffix(&btn);
+                row.set_activatable_widget(Some(&btn));
+                g_list.add(&row);
+                rlist.push(row);
+            }
+        }
+    };
+    rebuild();
+
+    let btn_refresh = gtk::Button::builder()
+        .icon_name("view-refresh-symbolic")
+        .valign(gtk::Align::Center)
+        .tooltip_text("Reload ~/.ssh/config")
+        .build();
+    {
+        let rebuild = rebuild.clone();
+        btn_refresh.connect_clicked(move |_| rebuild());
+    }
+    g_list.set_header_suffix(Some(&btn_refresh));
+
+    page
+}
+
 fn build_ui(app: &adw::Application) {
     // Force full-dark scheme regardless of the system theme.
     adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
@@ -4710,6 +4870,10 @@ fn build_ui(app: &adw::Application) {
     // ── Full Services page ──
     let (svc_all_page, svc_all_ui) = build_services_all_page();
     stack.add_titled(&svc_all_page, Some("svcall"), "All Services");
+
+    // ── SSH manager page ──
+    let ssh_page = build_ssh_page();
+    stack.add_titled(&ssh_page, Some("ssh"), "SSH Manager");
 
     // ── Power page ──
     let power_page = adw::PreferencesPage::new();
@@ -4969,6 +5133,7 @@ fn build_ui(app: &adw::Application) {
     sidebar.append(&sidebar_row("services", "System Services", "lucide-server"));
     sidebar.append(&sidebar_row("apps", "Applications & Processes", "lucide-apps"));
     sidebar.append(&sidebar_row("svcall", "All Services", "lucide-server"));
+    sidebar.append(&sidebar_row("ssh", "SSH Manager", "lucide-terminal"));
 
     // Section headers rendered above rows via the header func — this adds no
     // selectable rows, so the absolute index math in rebuild_dynamic (which
