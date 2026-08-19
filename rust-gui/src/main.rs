@@ -96,6 +96,29 @@ struct FanInfo {
     hist: VecDeque<f64>,
 }
 
+#[derive(Default, Clone)]
+struct NetInfo {
+    iface: String,
+    kind: String,  // "Kabel"/"Nirkabel"/"Lainnya"
+    model: String,
+    mac: String,
+    is_wireless: bool,
+    // live
+    rx_bps: f64,
+    tx_bps: f64,
+    total_rx: u64,
+    total_tx: u64,
+    status: String,
+    ipv4: String,
+    ipv6: String,
+    ssid: String,
+    signal: String,
+    freq: String,
+    rx_hist: VecDeque<f64>,
+    tx_hist: VecDeque<f64>,
+    prev: Option<(u64, u64)>,
+}
+
 #[derive(Default)]
 struct Shared {
     ready: bool,
@@ -169,6 +192,8 @@ struct Shared {
     gpus: Vec<GpuInfo>,
     // ── Fans (per hwmon fan input) ──
     fans: Vec<FanInfo>,
+    // ── Network interfaces ──
+    nets: Vec<NetInfo>,
     // ── Systemd services (key "user:unit"/"sys:unit" -> state) ──
     services: std::collections::HashMap<String, String>,
 }
@@ -963,6 +988,219 @@ fn sample_gpus(sh: &Arc<Mutex<Shared>>, do_nvidia: bool) {
     }
 }
 
+// Resolve an adapter marketing name from lspci for a PCI bus (e.g. "0000:03:00.0").
+fn lspci_name(bus: &str) -> String {
+    if bus.is_empty() {
+        return String::new();
+    }
+    let short = bus.strip_prefix("0000:").unwrap_or(bus);
+    if let Ok(out) = Command::new("lspci").args(["-mm", "-s", short]).output() {
+        let line = String::from_utf8_lossy(&out.stdout);
+        // Quoted fields: slot "class" "vendor" "device" ...  -> device is 3rd quote pair
+        let quoted: Vec<&str> = line.split('"').collect();
+        // indices 1=class,3=vendor,5=device
+        if quoted.len() > 5 {
+            return quoted[5].trim().to_string();
+        }
+    }
+    String::new()
+}
+
+fn enumerate_nets() -> Vec<NetInfo> {
+    let mut nets: Vec<(i32, NetInfo)> = Vec::new();
+    if let Ok(rd) = fs::read_dir("/sys/class/net") {
+        let mut ifs: Vec<String> = rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n != "lo" && !n.starts_with("veth"))
+            .collect();
+        ifs.sort();
+        for iface in ifs {
+            let base = format!("/sys/class/net/{iface}");
+            let is_wireless = Path::new(&format!("{base}/wireless")).exists();
+            let has_dev = Path::new(&format!("{base}/device")).exists();
+            let (kind, rank) = if is_wireless {
+                ("Nirkabel", 1)
+            } else if has_dev {
+                ("Kabel", 0)
+            } else {
+                ("Lainnya", 2)
+            };
+            let bus = fs::read_link(format!("{base}/device"))
+                .ok()
+                .and_then(|p| p.file_name().map(|s| s.to_string_lossy().to_string()))
+                .unwrap_or_default()
+                .to_uppercase();
+            let model = lspci_name(&bus);
+            let mac = fs::read_to_string(format!("{base}/address")).unwrap_or_default().trim().to_string();
+            nets.push((
+                rank,
+                NetInfo {
+                    iface: iface.clone(),
+                    kind: kind.into(),
+                    model,
+                    mac,
+                    is_wireless,
+                    rx_hist: VecDeque::from(vec![0.0; HISTORY]),
+                    tx_hist: VecDeque::from(vec![0.0; HISTORY]),
+                    ..Default::default()
+                },
+            ));
+        }
+    }
+    nets.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.iface.cmp(&b.1.iface)));
+    nets.into_iter().map(|(_, n)| n).collect()
+}
+
+fn gather_nets_static(sh: &Arc<Mutex<Shared>>) {
+    let n = enumerate_nets();
+    if let Ok(mut s) = sh.lock() {
+        s.nets = n;
+    }
+}
+
+fn net_signature(nets: &[NetInfo]) -> String {
+    let mut s = String::new();
+    for n in nets {
+        s.push_str(&n.iface);
+        s.push(';');
+    }
+    s
+}
+
+fn refresh_net_list(sh: &Arc<Mutex<Shared>>) {
+    let fresh = enumerate_nets();
+    if let Ok(mut s) = sh.lock() {
+        let mut old: std::collections::HashMap<String, NetInfo> =
+            s.nets.drain(..).map(|n| (n.iface.clone(), n)).collect();
+        let mut merged = Vec::with_capacity(fresh.len());
+        for mut f in fresh {
+            if let Some(o) = old.remove(&f.iface) {
+                f.rx_hist = o.rx_hist;
+                f.tx_hist = o.tx_hist;
+                f.prev = o.prev;
+                f.rx_bps = o.rx_bps;
+                f.tx_bps = o.tx_bps;
+                f.total_rx = o.total_rx;
+                f.total_tx = o.total_tx;
+                f.status = o.status;
+                f.ipv4 = o.ipv4;
+                f.ipv6 = o.ipv6;
+                f.ssid = o.ssid;
+                f.signal = o.signal;
+                f.freq = o.freq;
+            }
+            merged.push(f);
+        }
+        s.nets = merged;
+    }
+}
+
+// Per-tick throughput sampling from /sys/class/net statistics (cheap).
+fn sample_nets(sh: &Arc<Mutex<Shared>>) {
+    if let Ok(mut s) = sh.lock() {
+        for n in s.nets.iter_mut() {
+            let base = format!("/sys/class/net/{}", n.iface);
+            let rx = fs::read_to_string(format!("{base}/statistics/rx_bytes"))
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .unwrap_or(0);
+            let tx = fs::read_to_string(format!("{base}/statistics/tx_bytes"))
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .unwrap_or(0);
+            n.total_rx = rx;
+            n.total_tx = tx;
+            if let Some((prx, ptx)) = n.prev {
+                n.rx_bps = rx.saturating_sub(prx) as f64;
+                n.tx_bps = tx.saturating_sub(ptx) as f64;
+            }
+            n.prev = Some((rx, tx));
+            n.rx_hist.push_back(n.rx_bps.max(0.0));
+            while n.rx_hist.len() > HISTORY {
+                n.rx_hist.pop_front();
+            }
+            n.tx_hist.push_back(n.tx_bps.max(0.0));
+            while n.tx_hist.len() > HISTORY {
+                n.tx_hist.pop_front();
+            }
+            let oper = fs::read_to_string(format!("{base}/operstate")).unwrap_or_default().trim().to_string();
+            n.status = match oper.as_str() {
+                "up" => "Terhubung".into(),
+                "unknown" => {
+                    if n.total_rx > 0 || n.total_tx > 0 {
+                        "Terhubung".into()
+                    } else {
+                        "Tidak diketahui".into()
+                    }
+                }
+                "down" => "Tidak tersedia".into(),
+                other if !other.is_empty() => other.to_string(),
+                _ => "—".into(),
+            };
+        }
+    }
+}
+
+// Heavier extras (IP addresses + wireless link) gathered every 3rd tick.
+fn refresh_net_extra(sh: &Arc<Mutex<Shared>>) {
+    let list: Vec<(String, bool)> = match sh.lock() {
+        Ok(s) => s.nets.iter().map(|n| (n.iface.clone(), n.is_wireless)).collect(),
+        Err(_) => return,
+    };
+    let mut info: std::collections::HashMap<String, (String, String, String, String, String)> =
+        std::collections::HashMap::new(); // iface -> (v4, v6, ssid, signal, freq)
+    for (iface, wl) in &list {
+        let (mut v4, mut v6) = (String::new(), String::new());
+        if let Ok(out) = Command::new("ip").args(["-o", "addr", "show", iface]).output() {
+            for line in String::from_utf8_lossy(&out.stdout).lines() {
+                let f: Vec<&str> = line.split_whitespace().collect();
+                if let Some(pos) = f.iter().position(|&x| x == "inet") {
+                    if v4.is_empty() {
+                        v4 = f.get(pos + 1).map(|s| s.split('/').next().unwrap_or("").to_string()).unwrap_or_default();
+                    }
+                } else if let Some(pos) = f.iter().position(|&x| x == "inet6") {
+                    if let Some(a) = f.get(pos + 1) {
+                        // prefer a global (non fe80) address
+                        if !a.starts_with("fe80") && v6.is_empty() {
+                            v6 = a.split('/').next().unwrap_or("").to_string();
+                        }
+                    }
+                }
+            }
+        }
+        let (mut ssid, mut signal, mut freq) = (String::new(), String::new(), String::new());
+        if *wl {
+            if let Ok(out) = Command::new("iw").args(["dev", iface, "link"]).output() {
+                for line in String::from_utf8_lossy(&out.stdout).lines() {
+                    let t = line.trim();
+                    if let Some(v) = t.strip_prefix("SSID:") {
+                        ssid = v.trim().to_string();
+                    } else if let Some(v) = t.strip_prefix("signal:") {
+                        signal = v.trim().to_string();
+                    } else if let Some(v) = t.strip_prefix("freq:") {
+                        if let Ok(mhz) = v.trim().split('.').next().unwrap_or("").parse::<f64>() {
+                            freq = format!("{:.2} GHz", mhz / 1000.0);
+                        }
+                    }
+                }
+            }
+        }
+        info.insert(iface.clone(), (v4, v6, ssid, signal, freq));
+    }
+    if let Ok(mut s) = sh.lock() {
+        for n in s.nets.iter_mut() {
+            if let Some((v4, v6, ssid, signal, freq)) = info.get(&n.iface) {
+                n.ipv4 = v4.clone();
+                n.ipv6 = v6.clone();
+                n.ssid = ssid.clone();
+                n.signal = signal.clone();
+                n.freq = freq.clone();
+            }
+        }
+    }
+}
+
 // Enumerate fans from hwmon fanN_input (with fanN_label when present).
 fn enumerate_fans() -> Vec<FanInfo> {
     let mut fans: Vec<FanInfo> = Vec::new();
@@ -1263,10 +1501,13 @@ fn spawn_sampler(sh: Arc<Mutex<Shared>>) {
             sample_diskstats(&sh);
             sample_gpus(&sh, tick % 3 == 0);
             sample_fans(&sh);
+            sample_nets(&sh);
             if tick % 3 == 0 {
                 refresh_drive_list(&sh);
                 refresh_gpu_list(&sh);
                 refresh_fan_list(&sh);
+                refresh_net_list(&sh);
+                refresh_net_extra(&sh);
                 refresh_part_usage(&sh);
             }
             tick += 1;
@@ -1450,6 +1691,7 @@ struct Ui {
     drives: RefCell<Vec<DriveUi>>,
     gpus: RefCell<Vec<GpuUi>>,
     fans: RefCell<Vec<FanUi>>,
+    nets: RefCell<Vec<NetUi>>,
     // hotplug rebuild handles
     shared: Arc<Mutex<Shared>>,
     stack: adw::ViewStack,
@@ -1708,16 +1950,41 @@ impl Ui {
         self.mem_area.queue_draw();
         self.swap_area.queue_draw();
 
-        // ── Dynamic tabs (GPUs + fans + drives): rebuild on change, then update ──
+        // ── Dynamic tabs (GPUs + fans + nets + drives): rebuild on change, then update ──
         let sig = format!(
-            "{}#{}#{}",
+            "{}#{}#{}#{}",
             gpu_signature(&g.gpus),
             fan_signature(&g.fans),
+            net_signature(&g.nets),
             drive_signature(&g.drives)
         );
         if *self.dyn_sig.borrow() != sig {
-            self.rebuild_dynamic(&g.gpus, &g.fans, &g.drives);
+            self.rebuild_dynamic(&g.gpus, &g.fans, &g.nets, &g.drives);
             *self.dyn_sig.borrow_mut() = sig;
+        }
+        for nu in self.nets.borrow().iter() {
+            if let Some(n) = g.nets.get(nu.idx) {
+                let nset = |k: &str, v: String| {
+                    if let Some(l) = nu.lbl.get(k) {
+                        l.set_text(&v);
+                    }
+                };
+                nset("rspeed", fmt_bitrate(n.rx_bps));
+                nset("sspeed", fmt_bitrate(n.tx_bps));
+                nset("trx", fmt_bits_total(n.total_rx));
+                nset("ttx", fmt_bits_total(n.total_tx));
+                nset("status", if n.status.is_empty() { "—".into() } else { n.status.clone() });
+                nset("ipv4", if n.ipv4.is_empty() { "—".into() } else { n.ipv4.clone() });
+                nset("ipv6", if n.ipv6.is_empty() { "—".into() } else { n.ipv6.clone() });
+                if n.is_wireless {
+                    nset("ssid", if n.ssid.is_empty() { "—".into() } else { n.ssid.clone() });
+                    nset("signal", if n.signal.is_empty() { "—".into() } else { n.signal.clone() });
+                    nset("freq", if n.freq.is_empty() { "—".into() } else { n.freq.clone() });
+                }
+                let mx = n.rx_hist.iter().chain(n.tx_hist.iter()).cloned().fold(0.0_f64, f64::max);
+                nu.scale_lbl.set_text(&fmt_bitrate(mx));
+                nu.area.queue_draw();
+            }
         }
         for fu in self.fans.borrow().iter() {
             if let Some(f) = g.fans.get(fu.idx) {
@@ -1794,7 +2061,7 @@ impl Ui {
     // Rebuild the dynamic sidebar rows and stack pages (GPUs then drives) after a
     // hotplug/enumeration change. They live between Memory (index 1) and Power,
     // i.e. starting at index 2.
-    fn rebuild_dynamic(&self, gpus: &[GpuInfo], fans: &[FanInfo], drives: &[DriveInfo]) {
+    fn rebuild_dynamic(&self, gpus: &[GpuInfo], fans: &[FanInfo], nets: &[NetInfo], drives: &[DriveInfo]) {
         for r in self.dyn_rows.borrow().iter() {
             self.sidebar.remove(r);
         }
@@ -1805,6 +2072,7 @@ impl Ui {
         self.dyn_pages.borrow_mut().clear();
         self.gpus.borrow_mut().clear();
         self.fans.borrow_mut().clear();
+        self.nets.borrow_mut().clear();
         self.drives.borrow_mut().clear();
 
         let mut pos = 2i32; // after CPU(0), Memory(1)
@@ -1827,6 +2095,16 @@ impl Ui {
             self.dyn_rows.borrow_mut().push(row);
             self.dyn_pages.borrow_mut().push(page);
             self.fans.borrow_mut().push(fu);
+        }
+        for (i, info) in nets.iter().enumerate() {
+            let (page, nu) = build_net_page(&self.shared, i, info);
+            self.stack.add_titled(&page, Some(&format!("net{i}")), &format!("Net {i}"));
+            let row = sidebar_row(&format!("net{i}"), &format!("{} ({})", info.kind, info.iface), "lucide-network");
+            self.sidebar.insert(&row, pos);
+            pos += 1;
+            self.dyn_rows.borrow_mut().push(row);
+            self.dyn_pages.borrow_mut().push(page);
+            self.nets.borrow_mut().push(nu);
         }
         for (i, info) in drives.iter().enumerate() {
             let (page, du) = build_drive_page(&self.shared, i, info);
@@ -3049,6 +3327,140 @@ fn build_fan_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &FanInfo) -> (a
     (page, fu)
 }
 
+fn fmt_bitrate(bytes_per_s: f64) -> String {
+    let b = bytes_per_s.max(0.0) * 8.0;
+    if b >= 1e9 {
+        format!("{:.1} Gbps", b / 1e9)
+    } else if b >= 1e6 {
+        format!("{:.1} Mbps", b / 1e6)
+    } else {
+        format!("{:.0} Kbps", b / 1e3)
+    }
+}
+
+fn fmt_bits_total(bytes: u64) -> String {
+    let b = bytes as f64 * 8.0;
+    if b >= 1e9 {
+        format!("{:.1} Gb", b / 1e9)
+    } else if b >= 1e6 {
+        format!("{:.1} Mb", b / 1e6)
+    } else if b >= 1e3 {
+        format!("{:.1} Kb", b / 1e3)
+    } else {
+        format!("{b:.0} b")
+    }
+}
+
+struct NetUi {
+    idx: usize,
+    area: gtk::DrawingArea,
+    scale_lbl: gtk::Label,
+    lbl: std::collections::HashMap<&'static str, gtk::Label>,
+}
+
+// Build one network interface page (mirrors Mission Center's Network view):
+// throughput graph (RX filled + TX dashed), speeds/totals, and details.
+fn build_net_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &NetInfo) -> (adw::PreferencesPage, NetUi) {
+    let page = adw::PreferencesPage::new();
+
+    let g_head = adw::PreferencesGroup::builder().title(info.kind.clone()).build();
+    let row = adw::ActionRow::builder()
+        .title(if info.model.is_empty() { info.iface.clone() } else { info.model.clone() })
+        .subtitle(info.iface.clone())
+        .build();
+    g_head.add(&row);
+    page.add(&g_head);
+
+    let g_graph = adw::PreferencesGroup::builder().title("Throughput (1 menit)").build();
+    let scale_lbl = gtk::Label::new(Some("0 Kbps"));
+    scale_lbl.add_css_class("dim-label");
+    g_graph.set_header_suffix(Some(&scale_lbl));
+    let area = gtk::DrawingArea::new();
+    area.set_content_height(150);
+    area.set_hexpand(true);
+    area.add_css_class("cpu-graph-frame");
+    area.set_margin_top(6);
+    area.set_margin_bottom(6);
+    {
+        let sh = shared.clone();
+        area.set_draw_func(move |_a, cr, w, h| {
+            if let Ok(g) = sh.lock() {
+                if let Some(n) = g.nets.get(idx) {
+                    let mx = n
+                        .rx_hist
+                        .iter()
+                        .chain(n.tx_hist.iter())
+                        .cloned()
+                        .fold(1.0_f64, f64::max)
+                        * 1.15;
+                    // RX filled (shared blue style)
+                    draw_graph(cr, w as f64, h as f64, &n.rx_hist, mx);
+                    // TX dashed line on top
+                    let (w, h) = (w as f64, h as f64);
+                    let n2 = n.tx_hist.len();
+                    if n2 >= 2 && mx > 0.0 {
+                        let stepx = w / (n2 as f64 - 1.0);
+                        let yv = |v: f64| h - (v.clamp(0.0, mx) / mx) * (h - 2.0) - 1.0;
+                        cr.set_line_width(1.4);
+                        cr.set_dash(&[4.0, 3.0], 0.0);
+                        cr.set_source_rgb(0.55, 0.75, 1.0);
+                        for (i, v) in n.tx_hist.iter().enumerate() {
+                            let (x, y) = (i as f64 * stepx, yv(*v));
+                            if i == 0 {
+                                cr.move_to(x, y);
+                            } else {
+                                cr.line_to(x, y);
+                            }
+                        }
+                        let _ = cr.stroke();
+                        cr.set_dash(&[], 0.0);
+                    }
+                }
+            }
+        });
+    }
+    g_graph.add(&area);
+    page.add(&g_graph);
+
+    let mut lbl = std::collections::HashMap::new();
+    let g_stat = adw::PreferencesGroup::builder().title("Statistik").build();
+    lbl.insert("rspeed", info_row("Terima", &g_stat));
+    lbl.insert("sspeed", info_row("Kirim", &g_stat));
+    lbl.insert("trx", info_row("Total Diterima", &g_stat));
+    lbl.insert("ttx", info_row("Total Terkirim", &g_stat));
+    page.add(&g_stat);
+
+    let g_det = adw::PreferencesGroup::builder().title("Detail").build();
+    let det = |t: &'static str, gr: &adw::PreferencesGroup, lm: &mut std::collections::HashMap<&'static str, gtk::Label>, key: &'static str| {
+        let l = info_row(t, gr);
+        l.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+        l.set_max_width_chars(30);
+        l.set_selectable(true);
+        lm.insert(key, l);
+    };
+    // static rows
+    let l_iface = info_row("Nama Interface", &g_det);
+    l_iface.set_text(&info.iface);
+    let l_type = info_row("Tipe Koneksi", &g_det);
+    l_type.set_text(&info.kind);
+    lbl.insert("status", info_row("Status", &g_det));
+    if info.is_wireless {
+        det("SSID", &g_det, &mut lbl, "ssid");
+        lbl.insert("signal", info_row("Kekuatan Sinyal", &g_det));
+        lbl.insert("freq", info_row("Frekuensi", &g_det));
+    }
+    det("Alamat Hardware", &g_det, &mut lbl, "mac");
+    if let Some(l) = lbl.get("mac") {
+        l.set_text(if info.mac.is_empty() { "—" } else { &info.mac });
+    }
+    det("Alamat IPv4", &g_det, &mut lbl, "ipv4");
+    det("Alamat IPv6", &g_det, &mut lbl, "ipv6");
+    page.add(&g_det);
+
+    let nu = NetUi { idx, area, scale_lbl, lbl };
+    (page, nu)
+}
+
 fn build_ui(app: &adw::Application) {
     // Force full-dark scheme regardless of the system theme.
     adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
@@ -3070,6 +3482,7 @@ fn build_ui(app: &adw::Application) {
     gather_drives_static(&shared);
     gather_gpus_static(&shared);
     gather_fans_static(&shared);
+    gather_nets_static(&shared);
     spawn_sampler(shared.clone());
 
     let window = adw::ApplicationWindow::builder()
@@ -3456,6 +3869,7 @@ fn build_ui(app: &adw::Application) {
         drives: RefCell::new(Vec::new()),
         gpus: RefCell::new(Vec::new()),
         fans: RefCell::new(Vec::new()),
+        nets: RefCell::new(Vec::new()),
         shared: shared.clone(),
         stack: stack.clone(),
         sidebar: sidebar.clone(),
@@ -3464,17 +3878,18 @@ fn build_ui(app: &adw::Application) {
         dyn_sig: RefCell::new(String::new()),
     });
 
-    // Build the dynamic tabs (GPUs + fans + drives) now so they appear at startup.
+    // Build the dynamic tabs (GPUs + fans + nets + drives) now so they appear at startup.
     {
-        let (gs, fs_, ds) = shared
+        let (gs, fs_, ns, ds) = shared
             .lock()
-            .map(|g| (g.gpus.clone(), g.fans.clone(), g.drives.clone()))
+            .map(|g| (g.gpus.clone(), g.fans.clone(), g.nets.clone(), g.drives.clone()))
             .unwrap_or_default();
-        ui.rebuild_dynamic(&gs, &fs_, &ds);
+        ui.rebuild_dynamic(&gs, &fs_, &ns, &ds);
         *ui.dyn_sig.borrow_mut() = format!(
-            "{}#{}#{}",
+            "{}#{}#{}#{}",
             gpu_signature(&gs),
             fan_signature(&fs_),
+            net_signature(&ns),
             drive_signature(&ds)
         );
     }
