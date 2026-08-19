@@ -2689,20 +2689,7 @@ impl Ui {
                 inner.add_titled(&page, Some(&format!("g{i}")), &format!("GPU {i} ({})", info.kind));
                 self.gpus.borrow_mut().push(gu);
             }
-            let container = gtk::Box::new(gtk::Orientation::Vertical, 0);
-            if gpus.len() > 1 {
-                let switcher = adw::ViewSwitcher::builder()
-                    .stack(&inner)
-                    .policy(adw::ViewSwitcherPolicy::Wide)
-                    .build();
-                let bar = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-                bar.set_halign(gtk::Align::Center);
-                bar.set_margin_top(8);
-                bar.set_margin_bottom(4);
-                bar.append(&switcher);
-                container.append(&bar);
-            }
-            container.append(&inner);
+            let container = group_container(&inner, gpus.len() > 1);
             self.stack.add_titled(&container, Some("gpu"), "GPU");
             let row = sidebar_row("gpu", "GPU", "lucide-gpu");
             self.sidebar.insert(&row, pos);
@@ -2710,49 +2697,64 @@ impl Ui {
             self.dyn_rows.borrow_mut().push(row);
             self.dyn_pages.borrow_mut().push(container.upcast());
         }
-        for (i, info) in fans.iter().enumerate() {
-            let (page, fu) = build_fan_page(&self.shared, i, info);
-            self.stack.add_titled(&page, Some(&format!("fan{i}")), &format!("Fan {i}"));
-            let row = sidebar_row(&format!("fan{i}"), &format!("Fan {i} ({})", info.label), "lucide-fan");
+        if !fans.is_empty() {
+            let inner = adw::ViewStack::new();
+            for (i, info) in fans.iter().enumerate() {
+                let (page, fu) = build_fan_page(&self.shared, i, info);
+                inner.add_titled(&page, Some(&format!("f{i}")), &format!("Fan {i} ({})", info.label));
+                self.fans.borrow_mut().push(fu);
+            }
+            let container = group_container(&inner, fans.len() > 1);
+            self.stack.add_titled(&container, Some("fan"), "Fan");
+            let row = sidebar_row("fan", "Fan", "lucide-fan");
             self.sidebar.insert(&row, pos);
             pos += 1;
             self.dyn_rows.borrow_mut().push(row);
-            self.dyn_pages.borrow_mut().push(page.upcast());
-            self.fans.borrow_mut().push(fu);
+            self.dyn_pages.borrow_mut().push(container.upcast());
         }
-        for (i, info) in nets.iter().enumerate() {
-            let (page, nu) = build_net_page(&self.shared, i, info);
-            self.stack.add_titled(&page, Some(&format!("net{i}")), &format!("Net {i}"));
-            let row = sidebar_row(&format!("net{i}"), &format!("{} ({})", info.kind, info.iface), "lucide-network");
+        if !nets.is_empty() {
+            let inner = adw::ViewStack::new();
+            for (i, info) in nets.iter().enumerate() {
+                let (page, nu) = build_net_page(&self.shared, i, info);
+                inner.add_titled(&page, Some(&format!("n{i}")), &format!("{} ({})", info.kind, info.iface));
+                self.nets.borrow_mut().push(nu);
+            }
+            let container = group_container(&inner, nets.len() > 1);
+            self.stack.add_titled(&container, Some("net"), "Jaringan");
+            let row = sidebar_row("net", "Jaringan", "lucide-network");
             self.sidebar.insert(&row, pos);
             pos += 1;
             self.dyn_rows.borrow_mut().push(row);
-            self.dyn_pages.borrow_mut().push(page.upcast());
-            self.nets.borrow_mut().push(nu);
+            self.dyn_pages.borrow_mut().push(container.upcast());
         }
-        for (i, info) in drives.iter().enumerate() {
-            let (page, du) = build_drive_page(&self.shared, i, info);
-            self.stack.add_titled(&page, Some(&format!("drive{i}")), &format!("Drive {i}"));
-            let row = sidebar_row(
-                &format!("drive{i}"),
-                &format!("{} {} ({})", info.kind, i, info.dev),
-                "lucide-hard-drive",
-            );
+        if !drives.is_empty() {
+            let inner = adw::ViewStack::new();
+            for (i, info) in drives.iter().enumerate() {
+                let (page, du) = build_drive_page(&self.shared, i, info);
+                inner.add_titled(&page, Some(&format!("d{i}")), &format!("{} {} ({})", info.kind, i, info.dev));
+                self.drives.borrow_mut().push(du);
+            }
+            let container = group_container(&inner, drives.len() > 1);
+            self.stack.add_titled(&container, Some("drive"), "Drive");
+            let row = sidebar_row("drive", "Drive", "lucide-hard-drive");
             self.sidebar.insert(&row, pos);
             pos += 1;
             self.dyn_rows.borrow_mut().push(row);
-            self.dyn_pages.borrow_mut().push(page.upcast());
-            self.drives.borrow_mut().push(du);
+            self.dyn_pages.borrow_mut().push(container.upcast());
         }
-        for (i, info) in bats.iter().enumerate() {
-            let (page, bu) = build_bat_page(&self.shared, i, info);
-            self.stack.add_titled(&page, Some(&format!("bat{i}")), &format!("Baterai {i}"));
-            let row = sidebar_row(&format!("bat{i}"), &format!("Baterai {i} ({})", info.name), "lucide-battery");
+        if !bats.is_empty() {
+            let inner = adw::ViewStack::new();
+            for (i, info) in bats.iter().enumerate() {
+                let (page, bu) = build_bat_page(&self.shared, i, info);
+                inner.add_titled(&page, Some(&format!("b{i}")), &format!("Baterai {i} ({})", info.name));
+                self.bats.borrow_mut().push(bu);
+            }
+            let container = group_container(&inner, bats.len() > 1);
+            self.stack.add_titled(&container, Some("bat"), "Baterai");
+            let row = sidebar_row("bat", "Baterai", "lucide-battery");
             self.sidebar.insert(&row, pos);
-            pos += 1;
             self.dyn_rows.borrow_mut().push(row);
-            self.dyn_pages.borrow_mut().push(page.upcast());
-            self.bats.borrow_mut().push(bu);
+            self.dyn_pages.borrow_mut().push(container.upcast());
         }
         // If the previously selected row was removed, fall back to the first tab.
         if self.sidebar.selected_row().is_none() {
@@ -3810,6 +3812,26 @@ fn sidebar_row(name: &str, label: &str, icon: &str) -> gtk::ListBoxRow {
     bx.append(&lbl);
     row.set_child(Some(&bx));
     row
+}
+
+// Wrap an inner ViewStack in a vertical box, adding a top ViewSwitcher tab-bar
+// when there is more than one page (shown in-page, not in the title bar).
+fn group_container(inner: &adw::ViewStack, multi: bool) -> gtk::Box {
+    let c = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    if multi {
+        let switcher = adw::ViewSwitcher::builder()
+            .stack(inner)
+            .policy(adw::ViewSwitcherPolicy::Wide)
+            .build();
+        let bar = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        bar.set_halign(gtk::Align::Center);
+        bar.set_margin_top(8);
+        bar.set_margin_bottom(4);
+        bar.append(&switcher);
+        c.append(&bar);
+    }
+    c.append(inner);
+    c
 }
 
 fn fmt_clock(mhz: f64) -> String {
