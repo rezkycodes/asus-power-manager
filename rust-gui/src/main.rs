@@ -4818,13 +4818,16 @@ fn build_ui(app: &adw::Application) {
     });
 
     let side_scroll = gtk::ScrolledWindow::new();
+    side_scroll.add_css_class("side-scroll");
     side_scroll.set_child(Some(&sidebar));
     side_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     side_scroll.set_vexpand(true);
 
     // Sidebar pane — its own header bar carries the app title.
     let side_tv = adw::ToolbarView::new();
+    side_tv.add_css_class("side-tv");
     let side_header = adw::HeaderBar::new();
+    side_header.add_css_class("side-header");
     side_header.set_title_widget(Some(&adw::WindowTitle::new("Tweaks ASUS TUF", "ASUS TUF Gaming")));
     side_tv.add_top_bar(&side_header);
     side_tv.set_content(Some(&side_scroll));
@@ -4840,34 +4843,16 @@ fn build_ui(app: &adw::Application) {
     content_tv.add_top_bar(&content_header);
     content_tv.set_content(Some(&stack));
 
-    // Collapsible sidebar: AdwOverlaySplitView exposes show-sidebar, so a header
-    // toggle can hide the sidebar and let content expand (VS Code style), and it
-    // overlays instead of sitting side-by-side once collapsed on narrow windows.
+    // Fixed side-by-side split view.
     let split = adw::OverlaySplitView::new();
     split.set_sidebar(Some(&side_tv));
     split.set_content(Some(&content_tv));
     split.set_min_sidebar_width(210.0);
     split.set_max_sidebar_width(260.0);
-
-    // Collapse toggle in the content header, kept in sync with show-sidebar.
-    // Sidebar toggle — same pattern as Mission Center: a single ToggleButton in
-    // the content header, its `active` bound bidirectionally to show-sidebar.
-    // The window opens wide (side-by-side) so it toggles both ways; when narrowed
-    // below the breakpoint the sidebar overlays and AdwOverlaySplitView dismisses
-    // it on click-outside — matching Mission Center's behaviour.
-    let toggle_sidebar_button = gtk::ToggleButton::new();
-    toggle_sidebar_button.set_icon_name("sidebar-show-symbolic");
-    toggle_sidebar_button.set_tooltip_text(Some("Toggle Sidebar"));
-    content_header.pack_start(&toggle_sidebar_button);
-    split
-        .bind_property("show-sidebar", &toggle_sidebar_button, "active")
-        .sync_create()
-        .bidirectional()
-        .build();
+    split.set_collapsed(false);
 
     {
         let stack = stack.clone();
-        let split = split.clone();
         let content_title = content_title.clone();
         sidebar.connect_row_selected(move |_lb, row| {
             if let Some(r) = row {
@@ -4877,10 +4862,6 @@ fn build_ui(app: &adw::Application) {
                     let title = stack.page(&child).title().unwrap_or_default();
                     content_title.set_title(title.as_str());
                 }
-                // On narrow windows the sidebar overlays — close it after a pick.
-                if split.is_collapsed() {
-                    split.set_show_sidebar(false);
-                }
             }
         });
     }
@@ -4889,13 +4870,6 @@ fn build_ui(app: &adw::Application) {
     }
 
     window.set_content(Some(&split));
-
-    // Adaptive: overlay the sidebar (instead of side-by-side) on narrow windows.
-    if let Ok(cond) = adw::BreakpointCondition::parse("max-width: 640px") {
-        let bp = adw::Breakpoint::new(cond);
-        bp.add_setter(&split, "collapsed", Some(&true.to_value()));
-        window.add_breakpoint(bp);
-    }
 
     // threshold switch handler (guarded against programmatic set)
     let sync = Rc::new(Cell::new(false));
@@ -4917,6 +4891,7 @@ fn build_ui(app: &adw::Application) {
          scrolledwindow, textview, textview text, preferencespage, clamp, viewport { \
          background-color: #000000; } \
          headerbar { box-shadow: none; border-bottom: 1px solid rgba(255,255,255,0.06); } \
+         .side-header, .side-tv, .side-scroll, .navigation-sidebar { background-color: #000000; background: #000000; } \
          .svc-run { color: #ffffff; } .svc-fail { color: #9a9a9a; } .svc-idle { color: #5e5c64; } \
          scrolledwindow, scrolledwindow > viewport, .navigation-sidebar { border: none; box-shadow: none; } \
          .navigation-sidebar { background-color: #000000; } \
