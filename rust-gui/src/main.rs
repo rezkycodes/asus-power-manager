@@ -149,6 +149,17 @@ struct ProcInfo {
     cpu: f64,
     rss_kb: u64,
     swap_kb: u64,
+    io_bps: f64,
+    io_known: bool,
+}
+
+#[derive(Default, Clone)]
+struct SvcUnit {
+    unit: String,
+    is_user: bool,
+    active: String, // active/inactive/failed
+    sub: String,    // running/dead/exited/failed/listening/mounted
+    mem: u64, // bytes
 }
 
 #[derive(Default)]
@@ -231,6 +242,8 @@ struct Shared {
     // ── Processes (task manager) ──
     procs: Vec<ProcInfo>,
     proc_total: usize,
+    // ── All systemd units (full services view) ──
+    svc_all: Vec<SvcUnit>,
     // ── Systemd services (key "user:unit"/"sys:unit" -> state) ──
     services: std::collections::HashMap<String, String>,
 }
@@ -1039,10 +1052,12 @@ fn read_total_jiffies() -> u64 {
 fn sample_procs(
     prev: &mut std::collections::HashMap<u32, u64>,
     prev_total: &mut u64,
+    io_prev: &mut std::collections::HashMap<u32, u64>,
 ) -> (Vec<ProcInfo>, usize) {
     let total = read_total_jiffies();
     let dtotal = total.saturating_sub(*prev_total).max(1) as f64;
     let mut cur: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+    let mut io_cur: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
     let mut out: Vec<ProcInfo> = Vec::new();
     let mut count = 0usize;
     if let Ok(rd) = fs::read_dir("/proc") {
@@ -1086,11 +1101,26 @@ fn sample_procs(
                     }
                 }
             }
-            out.push(ProcInfo { pid, name, cpu, rss_kb: rss, swap_kb: swap });
+            // Per-process disk I/O (only readable for the user's own processes).
+            let (mut io_bps, mut io_known) = (0.0, false);
+            if let Ok(io) = fs::read_to_string(format!("/proc/{pid}/io")) {
+                let mut bytes = 0u64;
+                for line in io.lines() {
+                    if let Some(v) = line.strip_prefix("read_bytes:").or_else(|| line.strip_prefix("write_bytes:")) {
+                        bytes += v.trim().parse::<u64>().unwrap_or(0);
+                    }
+                }
+                io_known = true;
+                let d = bytes.saturating_sub(io_prev.get(&pid).copied().unwrap_or(bytes)) as f64;
+                io_bps = d / 3.0; // sampled ~every 3s
+                io_cur.insert(pid, bytes);
+            }
+            out.push(ProcInfo { pid, name, cpu, rss_kb: rss, swap_kb: swap, io_bps, io_known });
         }
     }
     *prev = cur;
     *prev_total = total;
+    *io_prev = io_cur;
     out.sort_by(|a, b| {
         b.cpu
             .partial_cmp(&a.cpu)
@@ -1098,6 +1128,78 @@ fn sample_procs(
             .then(b.rss_kb.cmp(&a.rss_kb))
     });
     (out, count)
+}
+
+// List all systemd units (service/socket/mount/timer/target) for the system or
+// user manager, with live memory from a single batched `systemctl show`.
+fn list_services(is_user: bool) -> Vec<SvcUnit> {
+    let run = |extra: &[&str]| {
+        let mut c = Command::new("systemctl");
+        if is_user {
+            c.arg("--user");
+        }
+        c.args(extra).output().ok()
+    };
+    let out = match run(&[
+        "list-units",
+        "--type=service,socket,mount,timer,target",
+        "--all",
+        "--plain",
+        "--no-legend",
+    ]) {
+        Some(o) => o,
+        None => return Vec::new(),
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut units: Vec<SvcUnit> = Vec::new();
+    let mut ids: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() < 4 {
+            continue;
+        }
+        let unit = f[0].to_string();
+        // f[1]=LOAD f[2]=ACTIVE f[3]=SUB, rest = description
+        let active = f[2].to_string();
+        let sub = f[3].to_string();
+        ids.push(unit.clone());
+        units.push(SvcUnit { unit, is_user, active, sub, mem: 0 });
+    }
+    if !ids.is_empty() {
+        let mut args: Vec<String> = vec!["show".into(), "-p".into(), "Id".into(), "-p".into(), "MemoryCurrent".into()];
+        args.extend(ids);
+        let mut c = Command::new("systemctl");
+        if is_user {
+            c.arg("--user");
+        }
+        if let Ok(o) = c.args(&args).output() {
+            let t = String::from_utf8_lossy(&o.stdout);
+            let mut map: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+            let (mut id, mut mem) = (String::new(), 0u64);
+            for line in t.lines() {
+                if line.is_empty() {
+                    if !id.is_empty() {
+                        map.insert(std::mem::take(&mut id), mem);
+                    }
+                    mem = 0;
+                } else if let Some(v) = line.strip_prefix("Id=") {
+                    id = v.to_string();
+                } else if let Some(v) = line.strip_prefix("MemoryCurrent=") {
+                    let n: u64 = v.parse().unwrap_or(0);
+                    mem = if n == u64::MAX { 0 } else { n };
+                }
+            }
+            if !id.is_empty() {
+                map.insert(id, mem);
+            }
+            for u in units.iter_mut() {
+                if let Some(m) = map.get(&u.unit) {
+                    u.mem = *m;
+                }
+            }
+        }
+    }
+    units
 }
 
 fn enumerate_bats() -> Vec<BatInfo> {
@@ -1558,6 +1660,7 @@ fn spawn_sampler(sh: Arc<Mutex<Shared>>) {
         let mut tick: u64 = 0;
         let mut proc_prev: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
         let mut proc_total_prev: u64 = 0;
+        let mut io_prev: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
         loop {
             if let Some((ov, per)) = read_stat() {
                 if let Some((pov, pper)) = &prev {
@@ -1773,10 +1876,17 @@ fn spawn_sampler(sh: Arc<Mutex<Shared>>) {
                 refresh_bat_list(&sh);
                 refresh_net_extra(&sh);
                 refresh_part_usage(&sh);
-                let (pv, pc) = sample_procs(&mut proc_prev, &mut proc_total_prev);
+                let (pv, pc) = sample_procs(&mut proc_prev, &mut proc_total_prev, &mut io_prev);
                 if let Ok(mut g) = sh.lock() {
                     g.procs = pv;
                     g.proc_total = pc;
+                }
+            }
+            if tick % 6 == 1 {
+                let mut all = list_services(false);
+                all.extend(list_services(true));
+                if let Ok(mut g) = sh.lock() {
+                    g.svc_all = all;
                 }
             }
             tick += 1;
@@ -1958,6 +2068,7 @@ struct Ui {
     swap_area: gtk::DrawingArea,
     mem_lbl: std::collections::HashMap<&'static str, gtk::Label>,
     apps: AppsUi,
+    svc_all: SvcAllUi,
     drives: RefCell<Vec<DriveUi>>,
     gpus: RefCell<Vec<GpuUi>>,
     fans: RefCell<Vec<FanUi>>,
@@ -2226,7 +2337,7 @@ impl Ui {
         {
             let mut sig = String::with_capacity(1024);
             for p in g.procs.iter().take(120) {
-                sig.push_str(&format!("{}:{:.0}:{};", p.pid, p.cpu, p.rss_kb));
+                sig.push_str(&format!("{}:{:.0}:{}:{:.0};", p.pid, p.cpu, p.rss_kb, p.io_bps));
             }
             if *self.apps.sig.borrow() != sig {
                 *self.apps.sig.borrow_mut() = sig;
@@ -2261,10 +2372,98 @@ impl Ui {
                     bx.append(&cell(format!("{:.0}%", p.cpu), 60, 1.0, false));
                     bx.append(&cell(fmt_kib(p.rss_kb), 90, 1.0, false));
                     bx.append(&cell(if p.swap_kb == 0 { "0".into() } else { fmt_kib(p.swap_kb) }, 90, 1.0, true));
+                    bx.append(&cell(if p.io_known { fmt_rate(p.io_bps) } else { "—".into() }, 90, 1.0, true));
                     row.set_child(Some(&bx));
                     self.apps.list.append(&row);
                     if want == Some(p.pid) {
                         self.apps.list.select_row(Some(&row));
+                    }
+                }
+            }
+        }
+
+        // ── Semua Layanan (full services) ──
+        {
+            let total = g.svc_all.len();
+            let running = g.svc_all.iter().filter(|u| u.sub == "running").count();
+            let failed = g.svc_all.iter().filter(|u| u.active == "failed" || u.sub == "failed").count();
+            self.svc_all
+                .row_hdr
+                .set_subtitle(&format!("{total} unit • {running} berjalan • {failed} gagal"));
+            let filt = self.svc_all.filter.get();
+            let pass = |u: &SvcUnit| match filt {
+                1 => u.sub == "running",
+                2 => u.active == "failed" || u.sub == "failed",
+                _ => true,
+            };
+            let mut sig = format!("f{filt};");
+            for u in &g.svc_all {
+                if pass(u) {
+                    sig.push_str(&u.unit);
+                    sig.push(':');
+                    sig.push_str(&u.sub);
+                    sig.push(';');
+                }
+            }
+            if *self.svc_all.sig.borrow() != sig {
+                *self.svc_all.sig.borrow_mut() = sig;
+                while let Some(r) = self.svc_all.list.first_child() {
+                    self.svc_all.list.remove(&r);
+                }
+                let want = self.svc_all.sel.borrow().clone();
+                for (label, grp_user) in [("Layanan Pengguna", true), ("Layanan Sistem", false)] {
+                    let mut items: Vec<&SvcUnit> =
+                        g.svc_all.iter().filter(|u| u.is_user == grp_user && pass(u)).collect();
+                    if items.is_empty() {
+                        continue;
+                    }
+                    items.sort_by(|a, b| a.unit.cmp(&b.unit));
+                    let hr = gtk::ListBoxRow::new();
+                    hr.set_selectable(false);
+                    hr.set_activatable(false);
+                    let hl = gtk::Label::new(Some(label));
+                    hl.set_xalign(0.0);
+                    hl.add_css_class("dim-label");
+                    hl.set_margin_top(8);
+                    hl.set_margin_bottom(4);
+                    hl.set_margin_start(12);
+                    hr.set_child(Some(&hl));
+                    self.svc_all.list.append(&hr);
+                    for u in items {
+                        let row = gtk::ListBoxRow::new();
+                        row.set_widget_name(&format!("{}:{}", if u.is_user { "U" } else { "S" }, u.unit));
+                        let bx = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+                        bx.set_margin_start(12);
+                        bx.set_margin_end(12);
+                        bx.set_margin_top(6);
+                        bx.set_margin_bottom(6);
+                        let dot = gtk::Label::new(Some("●"));
+                        dot.add_css_class(match (u.active.as_str(), u.sub.as_str()) {
+                            (_, "running") => "svc-run",
+                            ("failed", _) | (_, "failed") => "svc-fail",
+                            _ => "svc-idle",
+                        });
+                        let name = gtk::Label::new(Some(&u.unit));
+                        name.set_xalign(0.0);
+                        name.set_hexpand(true);
+                        name.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                        let sub = gtk::Label::new(Some(&u.sub));
+                        sub.set_size_request(90, -1);
+                        sub.set_xalign(1.0);
+                        sub.add_css_class("dim-label");
+                        let mem = gtk::Label::new(Some(&if u.mem > 0 { fmt_bytes(u.mem) } else { "—".into() }));
+                        mem.set_size_request(90, -1);
+                        mem.set_xalign(1.0);
+                        mem.add_css_class("dim-label");
+                        bx.append(&dot);
+                        bx.append(&name);
+                        bx.append(&sub);
+                        bx.append(&mem);
+                        row.set_child(Some(&bx));
+                        self.svc_all.list.append(&row);
+                        if want.as_ref().map(|(un, iu)| un == &u.unit && *iu == u.is_user).unwrap_or(false) {
+                            self.svc_all.list.select_row(Some(&row));
+                        }
                     }
                 }
             }
@@ -4012,6 +4211,7 @@ fn build_apps_page(_shared: &Arc<Mutex<Shared>>) -> (adw::PreferencesPage, AppsU
     hdr.append(&col("CPU", 60, 1.0));
     hdr.append(&col("Memori", 90, 1.0));
     hdr.append(&col("Swap", 90, 1.0));
+    hdr.append(&col("Drive", 90, 1.0));
 
     let list = gtk::ListBox::new();
     list.add_css_class("boxed-list");
@@ -4034,6 +4234,97 @@ fn build_apps_page(_shared: &Arc<Mutex<Shared>>) -> (adw::PreferencesPage, AppsU
     page.add(&g_tbl);
 
     let ui = AppsUi { row_hdr, list, sel, sig: RefCell::new(String::new()) };
+    (page, ui)
+}
+
+fn svc_action(action: &str, unit: &str, is_user: bool) {
+    if is_user {
+        run_user(vec!["systemctl".into(), "--user".into(), action.into(), unit.into()]);
+    } else {
+        // pkexec shows a graphical polkit prompt for privileged system-unit control
+        run_user(vec!["pkexec".into(), "systemctl".into(), action.into(), unit.into()]);
+    }
+}
+
+struct SvcAllUi {
+    row_hdr: adw::ActionRow,
+    list: gtk::ListBox,
+    filter: Rc<Cell<u8>>, // 0 all, 1 running, 2 failed
+    sel: Rc<RefCell<Option<(String, bool)>>>,
+    sig: RefCell<String>,
+}
+
+// Full systemd Services view (Mission Center-style): all system + user units,
+// grouped, with state dot, memory, filter chips, and Start/Stop/Restart on the
+// selected unit (user units via `systemctl --user`, system units via pkexec).
+fn build_services_all_page() -> (adw::PreferencesPage, SvcAllUi) {
+    let page = adw::PreferencesPage::new();
+    let sel: Rc<RefCell<Option<(String, bool)>>> = Rc::new(RefCell::new(None));
+    let filter: Rc<Cell<u8>> = Rc::new(Cell::new(0));
+
+    let g_head = adw::PreferencesGroup::builder().title("Semua Layanan").build();
+    let row_hdr = adw::ActionRow::builder().title("Layanan").subtitle("Memuat...").build();
+    for (label, act) in [("Start", "start"), ("Stop", "stop"), ("Restart", "restart")] {
+        let b = gtk::Button::builder().label(label).valign(gtk::Align::Center).build();
+        if act == "stop" {
+            b.add_css_class("destructive-action");
+        }
+        let sel2 = sel.clone();
+        b.connect_clicked(move |_| {
+            if let Some((unit, is_user)) = sel2.borrow().clone() {
+                svc_action(act, &unit, is_user);
+            }
+        });
+        row_hdr.add_suffix(&b);
+    }
+    g_head.add(&row_hdr);
+
+    // filter chips
+    let frow = adw::ActionRow::builder().title("Filter").build();
+    let fbox = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    fbox.set_valign(gtk::Align::Center);
+    let b_all = gtk::ToggleButton::with_label("Semua");
+    let b_run = gtk::ToggleButton::with_label("Berjalan");
+    let b_fail = gtk::ToggleButton::with_label("Gagal");
+    b_run.set_group(Some(&b_all));
+    b_fail.set_group(Some(&b_all));
+    b_all.set_active(true);
+    for (b, v) in [(&b_all, 0u8), (&b_run, 1), (&b_fail, 2)] {
+        let filter = filter.clone();
+        b.connect_toggled(move |btn| {
+            if btn.is_active() {
+                filter.set(v);
+            }
+        });
+        fbox.append(b);
+    }
+    frow.add_suffix(&fbox);
+    g_head.add(&frow);
+    page.add(&g_head);
+
+    let g_tbl = adw::PreferencesGroup::builder().title("Unit systemd").build();
+    let list = gtk::ListBox::new();
+    list.add_css_class("boxed-list");
+    list.set_selection_mode(gtk::SelectionMode::Single);
+    {
+        let sel = sel.clone();
+        list.connect_row_selected(move |_lb, row| {
+            let v = row.and_then(|r| {
+                let n = r.widget_name();
+                let n = n.as_str();
+                n.split_once(':').map(|(p, u)| (u.to_string(), p == "U"))
+            });
+            *sel.borrow_mut() = v;
+        });
+    }
+    let sw = gtk::ScrolledWindow::new();
+    sw.set_child(Some(&list));
+    sw.set_min_content_height(480);
+    sw.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    g_tbl.add(&sw);
+    page.add(&g_tbl);
+
+    let ui = SvcAllUi { row_hdr, list, filter, sel, sig: RefCell::new(String::new()) };
     (page, ui)
 }
 
@@ -4089,6 +4380,10 @@ fn build_ui(app: &adw::Application) {
     // ── Apps / Processes page ──
     let (apps_page, apps_ui) = build_apps_page(&shared);
     stack.add_titled(&apps_page, Some("apps"), "Aplikasi");
+
+    // ── Full Services page ──
+    let (svc_all_page, svc_all_ui) = build_services_all_page();
+    stack.add_titled(&svc_all_page, Some("svcall"), "Semua Layanan");
 
     // ── Power page ──
     let power_page = adw::PreferencesPage::new();
@@ -4347,6 +4642,7 @@ fn build_ui(app: &adw::Application) {
     sidebar.append(&sidebar_row("mouse", "Mouse Logitech", "lucide-mouse"));
     sidebar.append(&sidebar_row("services", "Layanan Sistem", "lucide-server"));
     sidebar.append(&sidebar_row("apps", "Aplikasi & Proses", "lucide-apps"));
+    sidebar.append(&sidebar_row("svcall", "Semua Layanan", "lucide-server"));
     {
         let stack = stack.clone();
         sidebar.connect_row_selected(move |_lb, row| {
@@ -4396,6 +4692,7 @@ fn build_ui(app: &adw::Application) {
          background-color: #000000; } \
          headerbar { box-shadow: none; border-bottom: 1px solid rgba(255,255,255,0.06); } \
          separator.nav-sep { background-color: #0f0f0f; background-image: none; min-width: 1px; } \
+         .svc-run { color: #2ec27e; } .svc-fail { color: #e01b24; } .svc-idle { color: #5e5c64; } \
          scrolledwindow, scrolledwindow > viewport, .navigation-sidebar { border: none; box-shadow: none; } \
          list, .boxed-list, .card, row { background-color: #0a0a0a; } \
          .boxed-list, .card { border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; } \
@@ -4449,6 +4746,7 @@ fn build_ui(app: &adw::Application) {
         swap_area,
         mem_lbl,
         apps: apps_ui,
+        svc_all: svc_all_ui,
         drives: RefCell::new(Vec::new()),
         gpus: RefCell::new(Vec::new()),
         fans: RefCell::new(Vec::new()),
