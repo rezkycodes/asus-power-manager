@@ -280,6 +280,9 @@ struct Shared {
     visible_tab: String,
     pause_hidden: bool,
     force_heavy: bool,
+    // ── Temperature alerts ──
+    alerts_enabled: bool,
+    alert_cooldowns: std::collections::HashMap<String, Instant>,
 }
 
 // ───────────────────────── helpers ─────────────────────────
@@ -1821,6 +1824,80 @@ fn sample_smart(sh: &Arc<Mutex<Shared>>) {
     }
 }
 
+fn check_temp_alerts(sh: &Arc<Mutex<Shared>>) {
+    const COOLDOWN: Duration = Duration::from_secs(300); // 5 minutes
+    const CPU_THRESH: f64 = 85.0;
+    const GPU_THRESH: f64 = 85.0;
+    const DISK_THRESH: f64 = 65.0;
+
+    let now = Instant::now();
+    // Collect candidate alerts: (source_key, title, body)
+    let mut candidates: Vec<(String, String, String)> = Vec::new();
+
+    if let Ok(g) = sh.lock() {
+        if !g.alerts_enabled {
+            return;
+        }
+        // CPU temperature
+        let cpu_temp = g.temp as f64;
+        if cpu_temp > CPU_THRESH {
+            candidates.push((
+                "cpu".into(),
+                "CPU Temperature Warning".into(),
+                format!("CPU is at {}°C (threshold: {}°C)", cpu_temp as i32, CPU_THRESH as i32),
+            ));
+        }
+        // GPU temperatures
+        for gpu in &g.gpus {
+            if gpu.temp > GPU_THRESH {
+                candidates.push((
+                    format!("gpu:{}", gpu.bus),
+                    "GPU Temperature Warning".into(),
+                    format!("{} is at {:.0}°C (threshold: {}°C)", gpu.name, gpu.temp, GPU_THRESH as i32),
+                ));
+            }
+        }
+        // Disk temperatures (from S.M.A.R.T. data)
+        for disk in &g.smart_data {
+            if let Ok(t) = disk.temp.trim_end_matches("°C").trim().parse::<f64>() {
+                if t > DISK_THRESH {
+                    let label = if disk.model.is_empty() { disk.dev.clone() } else { disk.model.clone() };
+                    candidates.push((
+                        format!("disk:{}", disk.dev),
+                        "Disk Temperature Warning".into(),
+                        format!("{} is at {:.0}°C (threshold: {}°C)", label, t, DISK_THRESH as i32),
+                    ));
+                }
+            }
+        }
+    } // lock dropped
+
+    if candidates.is_empty() {
+        return;
+    }
+
+    // Now filter by cooldown and fire notifications.
+    let mut to_fire: Vec<(String, String, String)> = Vec::new();
+    if let Ok(mut g) = sh.lock() {
+        for (key, title, body) in candidates {
+            let last = g.alert_cooldowns.get(&key).copied();
+            if last.is_none() || now.duration_since(last.unwrap()) >= COOLDOWN {
+                g.alert_cooldowns.insert(key, now);
+                to_fire.push((String::new(), title, body));
+            }
+        }
+    }
+    for (_key, title, body) in to_fire {
+        run_user(vec![
+            "notify-send".into(),
+            "-u".into(),
+            "critical".into(),
+            title,
+            body,
+        ]);
+    }
+}
+
 fn spawn_sampler(sh: Arc<Mutex<Shared>>) {
     std::thread::spawn(move || {
         let logical = sh.lock().map(|g| g.logical).unwrap_or(1);
@@ -2098,6 +2175,10 @@ fn spawn_sampler(sh: Arc<Mutex<Shared>>) {
             let want_smart = !pause_hidden || visible_tab == "smart";
             if want_smart && (tick % 6 == 2 || force) {
                 sample_smart(&sh);
+            }
+            // ── Temperature alerts (every 3s to avoid lock contention) ──
+            if tick % 3 == 0 {
+                check_temp_alerts(&sh);
             }
             tick += 1;
             std::thread::sleep(Duration::from_secs(1));
@@ -5278,6 +5359,7 @@ fn build_ui(app: &adw::Application) {
         swap_hist: VecDeque::from(vec![0.0; HISTORY]),
         visible_tab: "cpu".into(),
         pause_hidden: true,
+        alerts_enabled: true,
         ..Default::default()
     }));
     gather_drives_static(&shared);
@@ -5646,6 +5728,23 @@ fn build_ui(app: &adw::Application) {
                     // Resuming: refill hidden tabs on the next tick.
                     g.force_heavy = true;
                 }
+            }
+        });
+    }
+
+    // Temperature alerts toggle — bell icon, default ON.
+    let alert_toggle = gtk::ToggleButton::new();
+    alert_toggle.set_active(true);
+    alert_toggle.set_tooltip_text(Some("Temperature alerts (notify when CPU/GPU/Disk overheat)"));
+    // Use lucide-bell SVG as a child image widget.
+    let bell_img = lucide("lucide-bell", 16);
+    alert_toggle.set_child(Some(&bell_img));
+    content_header.pack_end(&alert_toggle);
+    {
+        let sh = shared.clone();
+        alert_toggle.connect_toggled(move |b| {
+            if let Ok(mut g) = sh.lock() {
+                g.alerts_enabled = b.is_active();
             }
         });
     }
