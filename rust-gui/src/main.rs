@@ -80,6 +80,11 @@ struct Shared {
     mem_pct: u32,
     mem_hist: VecDeque<f64>,
     swap_hist: VecDeque<f64>,
+    // DIMM hardware (from dmidecode, fetched once at startup)
+    dimm_type: String,
+    dimm_form: String,
+    dimm_speed: String,
+    dimm_slots: String,
     // ── Systemd services (key "user:unit"/"sys:unit" -> state) ──
     services: std::collections::HashMap<String, String>,
 }
@@ -319,6 +324,27 @@ fn gather_static(sh: &Arc<Mutex<Shared>>, logical: usize) {
     if model.is_empty() {
         model = "CPU".into();
     }
+    // DIMM/memory hardware via the privileged helper (dmidecode needs root).
+    // Runs once; sudo -n succeeds through the sudoers libexec wildcard.
+    let (mut dimm_type, mut dimm_form, mut dimm_speed, mut dimm_slots) =
+        (String::new(), String::new(), String::new(), String::new());
+    if let Ok(out) = Command::new("sudo")
+        .arg("-n")
+        .arg(script_path("battery-mem-dimm.sh"))
+        .output()
+    {
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            if let Some((k, v)) = line.split_once('=') {
+                match k {
+                    "TYPE" => dimm_type = v.trim().to_string(),
+                    "FORM" => dimm_form = v.trim().to_string(),
+                    "SPEED" => dimm_speed = v.trim().to_string(),
+                    "SLOTS" => dimm_slots = v.trim().to_string(),
+                    _ => {}
+                }
+            }
+        }
+    }
     let l1 = format!(
         "{} / {}",
         if l1d.is_empty() { "—" } else { &l1d },
@@ -334,6 +360,10 @@ fn gather_static(sh: &Arc<Mutex<Shared>>, logical: usize) {
         g.l1 = l1;
         g.l2 = if l2.is_empty() { "—".into() } else { l2 };
         g.l3 = if l3.is_empty() { "—".into() } else { l3 };
+        g.dimm_type = if dimm_type.is_empty() { "—".into() } else { dimm_type };
+        g.dimm_form = if dimm_form.is_empty() { "—".into() } else { dimm_form };
+        g.dimm_speed = if dimm_speed.is_empty() { "—".into() } else { dimm_speed };
+        g.dimm_slots = if dimm_slots.is_empty() { "—".into() } else { dimm_slots };
     }
 }
 
@@ -968,6 +998,10 @@ impl Ui {
         mset("cached", fmt_gib(g.mem_cached));
         mset("swapused", if g.swap_used == 0.0 { "0".into() } else { fmt_gib(g.swap_used) });
         mset("swapavail", fmt_gib((g.swap_total - g.swap_used).max(0.0)));
+        mset("dtype", g.dimm_type.clone());
+        mset("dform", g.dimm_form.clone());
+        mset("dspeed", g.dimm_speed.clone());
+        mset("dslots", g.dimm_slots.clone());
         self.mem_area.queue_draw();
         self.swap_area.queue_draw();
     }
@@ -1816,6 +1850,15 @@ fn build_memory_page(shared: &Arc<Mutex<Shared>>) -> MemPage {
     mem_lbl.insert("swapused", info_row("Swap Terpakai", &g_det));
     mem_lbl.insert("swapavail", info_row("Swap Tersedia", &g_det));
     page.add(&g_det);
+
+    let g_hw = adw::PreferencesGroup::builder()
+        .title("Perangkat Keras (DIMM)")
+        .build();
+    mem_lbl.insert("dtype", info_row("Tipe", &g_hw));
+    mem_lbl.insert("dform", info_row("Form Factor", &g_hw));
+    mem_lbl.insert("dspeed", info_row("Kecepatan", &g_hw));
+    mem_lbl.insert("dslots", info_row("Slot Terpakai", &g_hw));
+    page.add(&g_hw);
 
     (page, row_mem, mem_bar, mem_area, swap_area, mem_lbl)
 }
