@@ -119,6 +119,29 @@ struct NetInfo {
     prev: Option<(u64, u64)>,
 }
 
+#[derive(Default, Clone)]
+struct BatInfo {
+    name: String,
+    model: String,
+    path: String,
+    is_system: bool,
+    // live
+    percent: f64,
+    voltage: f64,
+    power: f64,
+    state: String,
+    cycles: i64,
+    serial: String,
+    technology: String,
+    capacity_health: f64,
+    energy_full: f64,
+    energy_full_design: f64,
+    voltage_min_design: f64,
+    charge_threshold: String,
+    pct_hist: VecDeque<f64>,
+    power_hist: VecDeque<f64>,
+}
+
 #[derive(Default)]
 struct Shared {
     ready: bool,
@@ -194,6 +217,8 @@ struct Shared {
     fans: Vec<FanInfo>,
     // ── Network interfaces ──
     nets: Vec<NetInfo>,
+    // ── Batteries (system + peripherals) ──
+    bats: Vec<BatInfo>,
     // ── Systemd services (key "user:unit"/"sys:unit" -> state) ──
     services: std::collections::HashMap<String, String>,
 }
@@ -988,6 +1013,154 @@ fn sample_gpus(sh: &Arc<Mutex<Shared>>, do_nvidia: bool) {
     }
 }
 
+fn enumerate_bats() -> Vec<BatInfo> {
+    let mut bats: Vec<(i32, BatInfo)> = Vec::new();
+    if let Ok(rd) = fs::read_dir("/sys/class/power_supply") {
+        let mut names: Vec<String> = rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        names.sort();
+        for name in names {
+            let path = format!("/sys/class/power_supply/{name}");
+            let ty = fs::read_to_string(format!("{path}/type")).unwrap_or_default().trim().to_string();
+            if ty != "Battery" {
+                continue;
+            }
+            let scope = fs::read_to_string(format!("{path}/scope")).unwrap_or_default().trim().to_string();
+            let is_system = scope != "Device";
+            let model = fs::read_to_string(format!("{path}/model_name"))
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            let rank = if is_system { 0 } else { 1 };
+            bats.push((
+                rank,
+                BatInfo {
+                    name: name.clone(),
+                    model,
+                    path,
+                    is_system,
+                    pct_hist: VecDeque::from(vec![0.0; HISTORY]),
+                    power_hist: VecDeque::from(vec![0.0; HISTORY]),
+                    ..Default::default()
+                },
+            ));
+        }
+    }
+    bats.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.name.cmp(&b.1.name)));
+    bats.into_iter().map(|(_, b)| b).collect()
+}
+
+fn gather_bats_static(sh: &Arc<Mutex<Shared>>) {
+    let b = enumerate_bats();
+    if let Ok(mut s) = sh.lock() {
+        s.bats = b;
+    }
+}
+
+fn bat_signature(bats: &[BatInfo]) -> String {
+    let mut s = String::new();
+    for b in bats {
+        s.push_str(&b.name);
+        s.push(if b.is_system { 'S' } else { 'D' });
+        s.push(';');
+    }
+    s
+}
+
+fn refresh_bat_list(sh: &Arc<Mutex<Shared>>) {
+    let fresh = enumerate_bats();
+    if let Ok(mut s) = sh.lock() {
+        let mut old: std::collections::HashMap<String, BatInfo> =
+            s.bats.drain(..).map(|b| (b.name.clone(), b)).collect();
+        let mut merged = Vec::with_capacity(fresh.len());
+        for mut f in fresh {
+            if let Some(o) = old.remove(&f.name) {
+                f.pct_hist = o.pct_hist;
+                f.power_hist = o.power_hist;
+            }
+            merged.push(f);
+        }
+        s.bats = merged;
+    }
+}
+
+// Per-tick battery sampling from /sys/class/power_supply (cheap).
+fn sample_bats(sh: &Arc<Mutex<Shared>>) {
+    if let Ok(mut s) = sh.lock() {
+        for b in s.bats.iter_mut() {
+            let p = b.path.clone();
+            let rn = |f: &str| fs::read_to_string(format!("{p}/{f}")).ok().map(|s| s.trim().to_string());
+            let num = |f: &str| rn(f).and_then(|s| s.parse::<f64>().ok());
+            // percent (numeric, else capacity_level word)
+            b.percent = num("capacity").unwrap_or_else(|| match rn("capacity_level").unwrap_or_default().as_str() {
+                "Full" => 100.0,
+                "High" => 80.0,
+                "Normal" | "Good" => 55.0,
+                "Low" => 20.0,
+                "Critical" => 5.0,
+                _ => b.percent,
+            });
+            let st = rn("status").unwrap_or_default();
+            b.state = match st.as_str() {
+                "Full" => "Penuh".into(),
+                "Charging" => "Mengisi".into(),
+                "Discharging" => "Mengosongkan".into(),
+                "Not charging" => "Tidak mengisi".into(),
+                s if !s.is_empty() => s.to_string(),
+                _ => "Tidak diketahui".into(),
+            };
+            if b.is_system {
+                let volt = num("voltage_now").map(|v| v / 1e6).unwrap_or(0.0);
+                b.voltage = volt;
+                // power: energy-based power_now, else current_now * voltage
+                b.power = num("power_now")
+                    .map(|w| w / 1e6)
+                    .or_else(|| num("current_now").map(|c| c / 1e6 * volt))
+                    .map(|w| w.abs())
+                    .unwrap_or(0.0);
+                b.cycles = num("cycle_count").unwrap_or(0.0) as i64;
+                b.serial = rn("serial_number").unwrap_or_default();
+                b.technology = match rn("technology").unwrap_or_default().as_str() {
+                    "Li-ion" | "Li-Ion" => "Lithium Ion".into(),
+                    "Li-poly" => "Lithium Polymer".into(),
+                    other => other.to_string(),
+                };
+                let vmin = num("voltage_min_design").map(|v| v / 1e6).unwrap_or(volt);
+                b.voltage_min_design = vmin;
+                // energy (Wh): prefer energy_* (µWh); else charge_* (µAh) * vmin
+                let ef = num("energy_full")
+                    .map(|e| e / 1e6)
+                    .or_else(|| num("charge_full").map(|c| c / 1e6 * vmin))
+                    .unwrap_or(0.0);
+                let efd = num("energy_full_design")
+                    .map(|e| e / 1e6)
+                    .or_else(|| num("charge_full_design").map(|c| c / 1e6 * vmin))
+                    .unwrap_or(0.0);
+                b.energy_full = ef;
+                b.energy_full_design = efd;
+                b.capacity_health = if efd > 0.0 { ef / efd * 100.0 } else { 0.0 };
+                b.charge_threshold = match num("charge_control_end_threshold") {
+                    Some(t) if t < 100.0 => "Ya".into(),
+                    Some(_) => "Tidak".into(),
+                    None => "—".into(),
+                };
+                b.power_hist.push_back(b.power.max(0.0));
+                while b.power_hist.len() > HISTORY {
+                    b.power_hist.pop_front();
+                }
+            } else {
+                b.serial = rn("serial_number").unwrap_or_default();
+            }
+            b.pct_hist.push_back(b.percent.clamp(0.0, 100.0));
+            while b.pct_hist.len() > HISTORY {
+                b.pct_hist.pop_front();
+            }
+        }
+    }
+}
+
 // Resolve an adapter marketing name from lspci for a PCI bus (e.g. "0000:03:00.0").
 fn lspci_name(bus: &str) -> String {
     if bus.is_empty() {
@@ -1502,11 +1675,13 @@ fn spawn_sampler(sh: Arc<Mutex<Shared>>) {
             sample_gpus(&sh, tick % 3 == 0);
             sample_fans(&sh);
             sample_nets(&sh);
+            sample_bats(&sh);
             if tick % 3 == 0 {
                 refresh_drive_list(&sh);
                 refresh_gpu_list(&sh);
                 refresh_fan_list(&sh);
                 refresh_net_list(&sh);
+                refresh_bat_list(&sh);
                 refresh_net_extra(&sh);
                 refresh_part_usage(&sh);
             }
@@ -1692,6 +1867,7 @@ struct Ui {
     gpus: RefCell<Vec<GpuUi>>,
     fans: RefCell<Vec<FanUi>>,
     nets: RefCell<Vec<NetUi>>,
+    bats: RefCell<Vec<BatUi>>,
     // hotplug rebuild handles
     shared: Arc<Mutex<Shared>>,
     stack: adw::ViewStack,
@@ -1950,17 +2126,49 @@ impl Ui {
         self.mem_area.queue_draw();
         self.swap_area.queue_draw();
 
-        // ── Dynamic tabs (GPUs + fans + nets + drives): rebuild on change, then update ──
+        // ── Dynamic tabs (GPUs + fans + nets + drives + bats): rebuild on change, then update ──
         let sig = format!(
-            "{}#{}#{}#{}",
+            "{}#{}#{}#{}#{}",
             gpu_signature(&g.gpus),
             fan_signature(&g.fans),
             net_signature(&g.nets),
-            drive_signature(&g.drives)
+            drive_signature(&g.drives),
+            bat_signature(&g.bats)
         );
         if *self.dyn_sig.borrow() != sig {
-            self.rebuild_dynamic(&g.gpus, &g.fans, &g.nets, &g.drives);
+            self.rebuild_dynamic(&g.gpus, &g.fans, &g.nets, &g.drives, &g.bats);
             *self.dyn_sig.borrow_mut() = sig;
+        }
+        for bu in self.bats.borrow().iter() {
+            if let Some(b) = g.bats.get(bu.idx) {
+                let bset = |k: &str, v: String| {
+                    if let Some(l) = bu.lbl.get(k) {
+                        l.set_text(&v);
+                    }
+                };
+                bset("pct", format!("{:.0}%", b.percent));
+                bset("state", if b.state.is_empty() { "—".into() } else { b.state.clone() });
+                bset("serial", if b.serial.is_empty() { "—".into() } else { b.serial.clone() });
+                if b.is_system {
+                    bset("volt", format!("{:.2} V", b.voltage));
+                    bset("power", format!("{:.2} W", b.power));
+                    bset("cycles", format!("{}", b.cycles));
+                    bset("tech", if b.technology.is_empty() { "—".into() } else { b.technology.clone() });
+                    bset("health", format!("{:.0}%", b.capacity_health));
+                    bset("ef", format!("{:.1} Wh", b.energy_full));
+                    bset("efd", format!("{:.1} Wh", b.energy_full_design));
+                    bset("vmin", format!("{:.2} V", b.voltage_min_design));
+                    bset("thr", b.charge_threshold.clone());
+                    if let Some(ps) = &bu.power_scale {
+                        let mx = b.power_hist.iter().cloned().fold(0.0_f64, f64::max);
+                        ps.set_text(&format!("{mx:.2} W"));
+                    }
+                    if let Some(pa) = &bu.power_area {
+                        pa.queue_draw();
+                    }
+                }
+                bu.pct_area.queue_draw();
+            }
         }
         for nu in self.nets.borrow().iter() {
             if let Some(n) = g.nets.get(nu.idx) {
@@ -2061,7 +2269,7 @@ impl Ui {
     // Rebuild the dynamic sidebar rows and stack pages (GPUs then drives) after a
     // hotplug/enumeration change. They live between Memory (index 1) and Power,
     // i.e. starting at index 2.
-    fn rebuild_dynamic(&self, gpus: &[GpuInfo], fans: &[FanInfo], nets: &[NetInfo], drives: &[DriveInfo]) {
+    fn rebuild_dynamic(&self, gpus: &[GpuInfo], fans: &[FanInfo], nets: &[NetInfo], drives: &[DriveInfo], bats: &[BatInfo]) {
         for r in self.dyn_rows.borrow().iter() {
             self.sidebar.remove(r);
         }
@@ -2073,6 +2281,7 @@ impl Ui {
         self.gpus.borrow_mut().clear();
         self.fans.borrow_mut().clear();
         self.nets.borrow_mut().clear();
+        self.bats.borrow_mut().clear();
         self.drives.borrow_mut().clear();
 
         let mut pos = 2i32; // after CPU(0), Memory(1)
@@ -2119,6 +2328,16 @@ impl Ui {
             self.dyn_rows.borrow_mut().push(row);
             self.dyn_pages.borrow_mut().push(page);
             self.drives.borrow_mut().push(du);
+        }
+        for (i, info) in bats.iter().enumerate() {
+            let (page, bu) = build_bat_page(&self.shared, i, info);
+            self.stack.add_titled(&page, Some(&format!("bat{i}")), &format!("Baterai {i}"));
+            let row = sidebar_row(&format!("bat{i}"), &format!("Baterai {i} ({})", info.name), "lucide-battery");
+            self.sidebar.insert(&row, pos);
+            pos += 1;
+            self.dyn_rows.borrow_mut().push(row);
+            self.dyn_pages.borrow_mut().push(page);
+            self.bats.borrow_mut().push(bu);
         }
         // If the previously selected row was removed, fall back to the first tab.
         if self.sidebar.selected_row().is_none() {
@@ -3461,6 +3680,121 @@ fn build_net_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &NetInfo) -> (a
     (page, nu)
 }
 
+struct BatUi {
+    idx: usize,
+    power_area: Option<gtk::DrawingArea>,
+    power_scale: Option<gtk::Label>,
+    pct_area: gtk::DrawingArea,
+    lbl: std::collections::HashMap<&'static str, gtk::Label>,
+}
+
+// Build one battery page (mirrors Mission Center's Battery view): system battery
+// shows a power-input graph + charge graph and full details; peripheral batteries
+// show a percentage graph + basic info.
+fn build_bat_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &BatInfo) -> (adw::PreferencesPage, BatUi) {
+    let page = adw::PreferencesPage::new();
+
+    let g_head = adw::PreferencesGroup::builder().title(format!("Baterai {idx}")).build();
+    let row = adw::ActionRow::builder()
+        .title(if info.model.is_empty() { info.name.clone() } else { info.model.clone() })
+        .subtitle(if info.is_system { "Baterai Sistem" } else { "Perangkat" })
+        .build();
+    g_head.add(&row);
+    page.add(&g_head);
+
+    // System battery: Power Input graph
+    let (mut power_area, mut power_scale) = (None, None);
+    if info.is_system {
+        let g_pow = adw::PreferencesGroup::builder().title("Daya Masuk (1 menit)").build();
+        let ps = gtk::Label::new(Some("0.00 W"));
+        ps.add_css_class("dim-label");
+        g_pow.set_header_suffix(Some(&ps));
+        let pa = gtk::DrawingArea::new();
+        pa.set_content_height(130);
+        pa.set_hexpand(true);
+        pa.add_css_class("cpu-graph-frame");
+        pa.set_margin_top(6);
+        pa.set_margin_bottom(6);
+        {
+            let sh = shared.clone();
+            pa.set_draw_func(move |_a, cr, w, h| {
+                if let Ok(g) = sh.lock() {
+                    if let Some(b) = g.bats.get(idx) {
+                        let mx = b.power_hist.iter().cloned().fold(1.0_f64, f64::max) * 1.15;
+                        draw_graph(cr, w as f64, h as f64, &b.power_hist, mx);
+                    }
+                }
+            });
+        }
+        g_pow.add(&pa);
+        page.add(&g_pow);
+        power_area = Some(pa);
+        power_scale = Some(ps);
+    }
+
+    // Charge / percentage graph
+    let g_pct = adw::PreferencesGroup::builder()
+        .title(if info.is_system { "Muatan (1 menit)" } else { "Persentase (1 menit)" })
+        .build();
+    let pct_area = gtk::DrawingArea::new();
+    pct_area.set_content_height(130);
+    pct_area.set_hexpand(true);
+    pct_area.add_css_class("cpu-graph-frame");
+    pct_area.set_margin_top(6);
+    pct_area.set_margin_bottom(6);
+    {
+        let sh = shared.clone();
+        pct_area.set_draw_func(move |_a, cr, w, h| {
+            if let Ok(g) = sh.lock() {
+                if let Some(b) = g.bats.get(idx) {
+                    draw_graph(cr, w as f64, h as f64, &b.pct_hist, 100.0);
+                }
+            }
+        });
+    }
+    g_pct.add(&pct_area);
+    page.add(&g_pct);
+
+    let mut lbl = std::collections::HashMap::new();
+    let g_stat = adw::PreferencesGroup::builder().title("Statistik").build();
+    lbl.insert("pct", info_row("Persentase", &g_stat));
+    if info.is_system {
+        lbl.insert("volt", info_row("Tegangan", &g_stat));
+        lbl.insert("power", info_row("Daya", &g_stat));
+    }
+    lbl.insert("state", info_row("Status", &g_stat));
+    if info.is_system {
+        lbl.insert("cycles", info_row("Siklus Pengisian", &g_stat));
+    }
+    page.add(&g_stat);
+
+    let g_det = adw::PreferencesGroup::builder().title("Detail").build();
+    let det = |t: &'static str, gr: &adw::PreferencesGroup, lm: &mut std::collections::HashMap<&'static str, gtk::Label>, key: &'static str| {
+        let l = info_row(t, gr);
+        l.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+        l.set_max_width_chars(28);
+        l.set_selectable(true);
+        lm.insert(key, l);
+    };
+    det("Serial", &g_det, &mut lbl, "serial");
+    let l_type = info_row("Tipe", &g_det);
+    l_type.set_text(if info.is_system { "Baterai" } else { "Perangkat" });
+    let l_pw = info_row("Powering System", &g_det);
+    l_pw.set_text(if info.is_system { "Ya" } else { "Tidak" });
+    if info.is_system {
+        lbl.insert("tech", info_row("Teknologi", &g_det));
+        lbl.insert("health", info_row("Kapasitas (Kesehatan)", &g_det));
+        lbl.insert("ef", info_row("Energy Full", &g_det));
+        lbl.insert("efd", info_row("Energy Full (desain)", &g_det));
+        lbl.insert("vmin", info_row("Voltage min (desain)", &g_det));
+        lbl.insert("thr", info_row("Ambang Pengisian", &g_det));
+    }
+    page.add(&g_det);
+
+    let bu = BatUi { idx, power_area, power_scale, pct_area, lbl };
+    (page, bu)
+}
+
 fn build_ui(app: &adw::Application) {
     // Force full-dark scheme regardless of the system theme.
     adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
@@ -3483,6 +3817,7 @@ fn build_ui(app: &adw::Application) {
     gather_gpus_static(&shared);
     gather_fans_static(&shared);
     gather_nets_static(&shared);
+    gather_bats_static(&shared);
     spawn_sampler(shared.clone());
 
     let window = adw::ApplicationWindow::builder()
@@ -3870,6 +4205,7 @@ fn build_ui(app: &adw::Application) {
         gpus: RefCell::new(Vec::new()),
         fans: RefCell::new(Vec::new()),
         nets: RefCell::new(Vec::new()),
+        bats: RefCell::new(Vec::new()),
         shared: shared.clone(),
         stack: stack.clone(),
         sidebar: sidebar.clone(),
@@ -3878,19 +4214,20 @@ fn build_ui(app: &adw::Application) {
         dyn_sig: RefCell::new(String::new()),
     });
 
-    // Build the dynamic tabs (GPUs + fans + nets + drives) now so they appear at startup.
+    // Build the dynamic tabs (GPUs + fans + nets + drives + bats) now so they appear at startup.
     {
-        let (gs, fs_, ns, ds) = shared
+        let (gs, fs_, ns, ds, bs) = shared
             .lock()
-            .map(|g| (g.gpus.clone(), g.fans.clone(), g.nets.clone(), g.drives.clone()))
+            .map(|g| (g.gpus.clone(), g.fans.clone(), g.nets.clone(), g.drives.clone(), g.bats.clone()))
             .unwrap_or_default();
-        ui.rebuild_dynamic(&gs, &fs_, &ns, &ds);
+        ui.rebuild_dynamic(&gs, &fs_, &ns, &ds, &bs);
         *ui.dyn_sig.borrow_mut() = format!(
-            "{}#{}#{}#{}",
+            "{}#{}#{}#{}#{}",
             gpu_signature(&gs),
             fan_signature(&fs_),
             net_signature(&ns),
-            drive_signature(&ds)
+            drive_signature(&ds),
+            bat_signature(&bs)
         );
     }
 
