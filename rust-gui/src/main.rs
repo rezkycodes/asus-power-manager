@@ -152,6 +152,21 @@ struct BatInfo {
 }
 
 #[derive(Default, Clone)]
+struct DiskSmartInfo {
+    #[allow(dead_code)]
+    dev: String,
+    health: String,
+    temp: String,
+    power_on_hours: String,
+    power_cycles: String,
+    reallocated: String,
+    percent_used: String,
+    data_written: String,
+    model: String,
+    smartctl_missing: bool,
+}
+
+#[derive(Default, Clone)]
 struct ProcInfo {
     pid: u32,
     name: String,
@@ -241,6 +256,8 @@ struct Shared {
     dimm_slots: String,
     // ── Drives (per physical disk) ──
     drives: Vec<DriveInfo>,
+    // ── Disk S.M.A.R.T. health ──
+    smart_data: Vec<DiskSmartInfo>,
     // ── GPUs (per adapter) ──
     gpus: Vec<GpuInfo>,
     // ── Fans (per hwmon fan input) ──
@@ -1763,6 +1780,47 @@ fn sample_fans(sh: &Arc<Mutex<Shared>>) {
     }
 }
 
+// ───────────────────────── Disk S.M.A.R.T. sampling ─────────────────────────
+fn sample_smart(sh: &Arc<Mutex<Shared>>) {
+    // Get the list of drive devices from Shared.
+    let devs: Vec<String> = match sh.lock() {
+        Ok(g) => g.drives.iter().map(|d| d.dev.clone()).collect(),
+        Err(_) => return,
+    };
+    let script = script_path("asus-disk-smart.sh");
+    let mut results = Vec::new();
+    for dev in &devs {
+        let out = Command::new("sudo")
+            .args(["-n", &script, dev])
+            .output();
+        let mut info = DiskSmartInfo { dev: dev.clone(), ..Default::default() };
+        if let Ok(o) = out {
+            let text = String::from_utf8_lossy(&o.stdout);
+            for line in text.lines() {
+                if let Some((k, v)) = line.split_once('=') {
+                    let v = v.trim().to_string();
+                    match k.trim() {
+                        "SMARTCTL_MISSING" => { info.smartctl_missing = v == "1"; }
+                        "HEALTH" => info.health = v,
+                        "TEMP" => info.temp = v,
+                        "POWER_ON_HOURS" => info.power_on_hours = v,
+                        "POWER_CYCLES" => info.power_cycles = v,
+                        "REALLOCATED" => info.reallocated = v,
+                        "PERCENT_USED" => info.percent_used = v,
+                        "DATA_WRITTEN" => info.data_written = v,
+                        "MODEL" => info.model = v,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        results.push(info);
+    }
+    if let Ok(mut g) = sh.lock() {
+        g.smart_data = results;
+    }
+}
+
 fn spawn_sampler(sh: Arc<Mutex<Shared>>) {
     std::thread::spawn(move || {
         let logical = sh.lock().map(|g| g.logical).unwrap_or(1);
@@ -2036,6 +2094,11 @@ fn spawn_sampler(sh: Arc<Mutex<Shared>>) {
                     }
                 }
             }
+            // Disk S.M.A.R.T. — every 6th tick, gated by visibility.
+            let want_smart = !pause_hidden || visible_tab == "smart";
+            if want_smart && (tick % 6 == 2 || force) {
+                sample_smart(&sh);
+            }
             tick += 1;
             std::thread::sleep(Duration::from_secs(1));
         }
@@ -2218,6 +2281,7 @@ struct Ui {
     apps: AppsUi,
     svc_all: SvcAllUi,
     drives: RefCell<Vec<DriveUi>>,
+    smart: RefCell<Option<DiskHealthUi>>,
     gpus: RefCell<Vec<GpuUi>>,
     fans: RefCell<Vec<FanUi>>,
     nets: RefCell<Vec<NetUi>>,
@@ -2829,6 +2893,49 @@ impl Ui {
                 du.thru_area.queue_draw();
             }
         }
+        // ── Disk Health (S.M.A.R.T.) refresh ──
+        if let Some(smu) = self.smart.borrow().as_ref() {
+            for (i, lbl) in smu.labels.iter().enumerate() {
+                if let Some(info) = g.smart_data.get(i) {
+                    let sset = |k: &str, v: &str| {
+                        if let Some(l) = lbl.get(k) {
+                            l.set_text(v);
+                        }
+                    };
+                    if info.smartctl_missing {
+                        sset("temp", "smartmontools not installed");
+                    } else {
+                        if info.temp.is_empty() || info.temp == "Unknown" {
+                            sset("temp", "—");
+                        } else {
+                            sset("temp", &format!("{}°C", info.temp));
+                        }
+                        let dash = |s: &str| if s.is_empty() || s == "Unknown" || s == "N/A" { "—".to_string() } else { s.to_string() };
+                        sset("hours", &dash(&info.power_on_hours));
+                        sset("cycles", &dash(&info.power_cycles));
+                        sset("realloc", &dash(&info.reallocated));
+                        if info.percent_used.is_empty() || info.percent_used == "N/A" {
+                            sset("pct", "—");
+                        } else {
+                            sset("pct", &format!("{}%", info.percent_used));
+                        }
+                        sset("written", &dash(&info.data_written));
+                    }
+                    // Health label with color
+                    if let Some(h_lbl) = smu.health_labels.get(i) {
+                        if info.smartctl_missing {
+                            h_lbl.set_markup("<span foreground='#888888'>Install smartmontools</span>");
+                        } else if info.health.contains("PASSED") {
+                            h_lbl.set_markup("<span foreground='#4caf50'>PASSED</span>");
+                        } else if info.health.contains("FAILED") {
+                            h_lbl.set_markup("<span foreground='#f44336'>FAILED</span>");
+                        } else {
+                            h_lbl.set_text(&info.health);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Rebuild the dynamic sidebar rows and stack pages (GPUs then drives) after a
@@ -2848,6 +2955,7 @@ impl Ui {
         self.nets.borrow_mut().clear();
         self.bats.borrow_mut().clear();
         self.drives.borrow_mut().clear();
+        *self.smart.borrow_mut() = None;
 
         let mut pos = 2i32; // after CPU(0), Memory(1)
         if !gpus.is_empty() {
@@ -2921,6 +3029,25 @@ impl Ui {
             pos += 1;
             self.dyn_rows.borrow_mut().push(row);
             self.dyn_pages.borrow_mut().push(container.upcast());
+        }
+        // Disk Health (S.M.A.R.T.) — always show if drives exist.
+        if !drives.is_empty() {
+            let (page, smu) = build_disk_health_page(&self.shared, drives);
+            let container: gtk::Box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            let sw = gtk::ScrolledWindow::builder()
+                .hscrollbar_policy(gtk::PolicyType::Never)
+                .vscrollbar_policy(gtk::PolicyType::Automatic)
+                .vexpand(true)
+                .build();
+            sw.set_child(Some(&page));
+            container.append(&sw);
+            self.stack.add_titled(&container, Some("smart"), "Disk Health");
+            let row = sidebar_row("smart", "Disk Health", "lucide-heart-pulse");
+            self.sidebar.insert(&row, pos);
+            pos += 1;
+            self.dyn_rows.borrow_mut().push(row);
+            self.dyn_pages.borrow_mut().push(container.upcast());
+            *self.smart.borrow_mut() = Some(smu);
         }
         if !bats.is_empty() {
             let inner = adw::ViewStack::new();
@@ -3986,10 +4113,63 @@ fn build_drive_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &DriveInfo) -
     (page, du)
 }
 
+// ───────────────────────── Disk Health (S.M.A.R.T.) ─────────────────────────
+struct DiskHealthUi {
+    labels: Vec<std::collections::HashMap<&'static str, gtk::Label>>,
+    health_labels: Vec<gtk::Label>,
+}
+
+fn build_disk_health_page(shared: &Arc<Mutex<Shared>>, drives: &[DriveInfo]) -> (adw::PreferencesPage, DiskHealthUi) {
+    let page = adw::PreferencesPage::new();
+    let mut all_labels = Vec::new();
+    let mut health_labels = Vec::new();
+
+    if drives.is_empty() {
+        let grp = adw::PreferencesGroup::builder().title("No Disks Detected").build();
+        page.add(&grp);
+        return (page, DiskHealthUi { labels: all_labels, health_labels });
+    }
+
+    for (i, info) in drives.iter().enumerate() {
+        let title = if info.model.is_empty() {
+            format!("{} ({})", info.dev, info.kind)
+        } else {
+            format!("{} — {} ({})", info.dev, info.model, info.kind)
+        };
+        let grp = adw::PreferencesGroup::builder().title(&title).build();
+
+        let mut lbl = std::collections::HashMap::new();
+
+        // Health row (special: green/red text)
+        let row_h = adw::ActionRow::builder().title("Health Status").build();
+        let h_lbl = gtk::Label::new(Some("--"));
+        h_lbl.add_css_class("dim-label");
+        h_lbl.set_valign(gtk::Align::Center);
+        row_h.add_suffix(&h_lbl);
+        grp.add(&row_h);
+        health_labels.push(h_lbl);
+
+        lbl.insert("temp", info_row("Temperature", &grp));
+        lbl.insert("hours", info_row("Power-On Hours", &grp));
+        lbl.insert("cycles", info_row("Power Cycles", &grp));
+        lbl.insert("realloc", info_row("Reallocated Sectors", &grp));
+        lbl.insert("pct", info_row("Percentage Used (SSD)", &grp));
+        lbl.insert("written", info_row("Total Data Written", &grp));
+
+        let _ = i; // idx stored implicitly by Vec order
+        all_labels.push(lbl);
+        page.add(&grp);
+    }
+
+    // Smartctl-missing message (hidden by default, shown when needed)
+    let _shared = shared.clone();
+    (page, DiskHealthUi { labels: all_labels, health_labels })
+}
+
 // Classify a sidebar row into a section, for the list header func.
 fn sidebar_section(name: &str) -> &'static str {
     match name {
-        "cpu" | "memory" | "gpu" | "fan" | "net" | "drive" | "bat" => "Monitoring",
+        "cpu" | "memory" | "gpu" | "fan" | "net" | "drive" | "smart" | "bat" => "Monitoring",
         _ => "Control & System",
     }
 }
@@ -5375,6 +5555,7 @@ fn build_ui(app: &adw::Application) {
         apps: apps_ui,
         svc_all: svc_all_ui,
         drives: RefCell::new(Vec::new()),
+        smart: RefCell::new(None),
         gpus: RefCell::new(Vec::new()),
         fans: RefCell::new(Vec::new()),
         nets: RefCell::new(Vec::new()),
