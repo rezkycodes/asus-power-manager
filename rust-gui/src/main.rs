@@ -5038,6 +5038,228 @@ fn build_ssh_page() -> adw::PreferencesPage {
     page
 }
 
+
+// ─── System Log Viewer ────────────────────────────────────────────────────────
+fn build_logs_page() -> adw::PreferencesPage {
+    let page = adw::PreferencesPage::new();
+
+    let g_head = adw::PreferencesGroup::builder()
+        .title("System Logs")
+        .description("View journalctl logs filtered by priority &amp; time range")
+        .build();
+
+    // ── Filter bar ──
+    let fbox = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    fbox.set_margin_top(4);
+    fbox.set_margin_bottom(4);
+
+    // Priority dropdown
+    let prio_model = gtk::StringList::new(&["All", "Error", "Warning", "Info"]);
+    let prio_dd = gtk::DropDown::builder()
+        .model(&prio_model)
+        .selected(0)
+        .valign(gtk::Align::Center)
+        .build();
+    prio_dd.set_size_request(110, -1);
+
+    // Time-range dropdown
+    let time_model = gtk::StringList::new(&["1 hour", "6 hours", "24 hours", "7 days"]);
+    let time_dd = gtk::DropDown::builder()
+        .model(&time_model)
+        .selected(0)
+        .valign(gtk::Align::Center)
+        .build();
+    time_dd.set_size_request(110, -1);
+
+    // Search entry
+    let search_entry = gtk::Entry::builder()
+        .placeholder_text("Search logs...")
+        .hexpand(true)
+        .valign(gtk::Align::Center)
+        .build();
+
+    fbox.append(&gtk::Label::new(Some("Priority:")));
+    fbox.append(&prio_dd);
+    fbox.append(&gtk::Label::new(Some("Time:")));
+    fbox.append(&time_dd);
+    fbox.append(&search_entry);
+
+    let frow = adw::ActionRow::new();
+    frow.set_child(Some(&fbox));
+    frow.set_activatable(false);
+    g_head.add(&frow);
+    page.add(&g_head);
+
+    // ── Log display area ──
+    let g_logs = adw::PreferencesGroup::builder().title("Log Entries").build();
+
+    let text_view = gtk::TextView::builder()
+        .editable(false)
+        .monospace(true)
+        .cursor_visible(false)
+        .wrap_mode(gtk::WrapMode::WordChar)
+        .top_margin(8)
+        .bottom_margin(8)
+        .left_margin(8)
+        .right_margin(8)
+        .build();
+    text_view.add_css_class("card");
+
+    let sw = gtk::ScrolledWindow::new();
+    sw.set_child(Some(&text_view));
+    sw.set_min_content_height(420);
+    sw.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+    g_logs.add(&sw);
+
+    // ── Buttons (Refresh + Load More) ──
+    let btn_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    btn_box.set_halign(gtk::Align::End);
+    btn_box.set_margin_top(8);
+    let btn_refresh = gtk::Button::builder().label("Refresh").valign(gtk::Align::Center).build();
+    btn_refresh.add_css_class("suggested-action");
+    let btn_more = gtk::Button::builder().label("Load More").valign(gtk::Align::Center).build();
+    btn_box.append(&btn_refresh);
+    btn_box.append(&btn_more);
+    let brow = adw::ActionRow::new();
+    brow.set_child(Some(&btn_box));
+    brow.set_activatable(false);
+    g_logs.add(&brow);
+    page.add(&g_logs);
+
+    // ── Shared state for log offset (for Load More pagination) ──
+    let log_offset: Rc<Cell<u32>> = Rc::new(Cell::new(0));
+
+    // Fetch logs helper — runs journalctl in a background thread, sends text
+    // back via Arc<Mutex<>> + glib::idle_add_local_once (GTK objects stay on
+    // main thread).
+    let fetch_logs = {
+        let text_view = text_view.clone();
+        let prio_dd = prio_dd.clone();
+        let time_dd = time_dd.clone();
+        let search_entry = search_entry.clone();
+        let log_offset = log_offset.clone();
+        move |append: bool| {
+            let prio_idx = prio_dd.selected();
+            let time_idx = time_dd.selected();
+            let search_text = search_entry.text().to_string();
+            let offset = if append { log_offset.get() } else { 0u32 };
+
+            let result: Arc<Mutex<Option<(String, u32)>>> = Arc::new(Mutex::new(None));
+            let result2 = result.clone();
+
+            std::thread::spawn(move || {
+                let mut args: Vec<&str> = vec![
+                    "journalctl",
+                    "--no-pager",
+                    "-o", "short-iso",
+                    "-n", "500",
+                ];
+
+                // Priority filter
+                match prio_idx {
+                    1 => { args.push("-p"); args.push("err"); }
+                    2 => { args.push("-p"); args.push("warning"); }
+                    3 => { args.push("-p"); args.push("info"); }
+                    _ => {} // All
+                }
+
+                // Time range
+                let since = match time_idx {
+                    1 => "6 hours ago",
+                    2 => "24 hours ago",
+                    3 => "7 days ago",
+                    _ => "1 hour ago",
+                };
+                args.push("--since");
+                args.push(since);
+
+                let output = Command::new(args[0])
+                    .args(&args[1..])
+                    .output();
+
+                let text = match output {
+                    Ok(o) => {
+                        let raw = String::from_utf8_lossy(&o.stdout).to_string();
+                        if raw.trim().is_empty() {
+                            "(no log entries found)".to_string()
+                        } else {
+                            raw
+                        }
+                    }
+                    Err(e) => format!("Error running journalctl: {e}"),
+                };
+
+                // Client-side search filter
+                let filtered = if search_text.is_empty() {
+                    text
+                } else {
+                    let lower = search_text.to_lowercase();
+                    text.lines()
+                        .filter(|l| l.to_lowercase().contains(&lower))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                };
+
+                // Pagination: if offset>0, skip first `offset` lines
+                let final_text = if offset > 0 {
+                    let lines: Vec<&str> = filtered.lines().collect();
+                    let skip = offset as usize;
+                    if skip >= lines.len() {
+                        "(no more entries)".to_string()
+                    } else {
+                        lines[skip..].join("\n")
+                    }
+                } else {
+                    filtered
+                };
+
+                let line_count = final_text.lines().count() as u32;
+                if let Ok(mut r) = result2.lock() {
+                    *r = Some((final_text, line_count));
+                }
+            });
+
+            // Poll result from main thread via short idle timer
+            let tv = text_view.clone();
+            let lo = log_offset.clone();
+            glib::timeout_add_local(Duration::from_millis(100), move || {
+                if let Ok(mut guard) = result.lock() {
+                    if let Some((text, count)) = guard.take() {
+                        let buf = tv.buffer();
+                        if append {
+                            let mut end = buf.end_iter();
+                            buf.insert(&mut end, "\n");
+                            buf.insert(&mut end, &text);
+                        } else {
+                            buf.set_text(&text);
+                        }
+                        lo.set(if append { lo.get() + count } else { count });
+                        return glib::ControlFlow::Break;
+                    }
+                }
+                glib::ControlFlow::Continue
+            });
+        }
+    };
+
+    // Wire Refresh button
+    {
+        let fetch = fetch_logs.clone();
+        btn_refresh.connect_clicked(move |_| fetch(false));
+    }
+
+    // Wire Load More button
+    {
+        let fetch = fetch_logs.clone();
+        btn_more.connect_clicked(move |_| fetch(true));
+    }
+
+    // Initial load
+    fetch_logs(false);
+
+    page
+}
+
 fn build_ui(app: &adw::Application) {
     // Force full-dark scheme regardless of the system theme.
     adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
@@ -5097,6 +5319,10 @@ fn build_ui(app: &adw::Application) {
     // ── SSH manager page ──
     let ssh_page = build_ssh_page();
     stack.add_titled(&ssh_page, Some("ssh"), "SSH Manager");
+
+    // ── System Logs page ──
+    let logs_page = build_logs_page();
+    stack.add_titled(&logs_page, Some("logs"), "System Logs");
 
     // ── Power page ──
     let power_page = adw::PreferencesPage::new();
@@ -5357,6 +5583,7 @@ fn build_ui(app: &adw::Application) {
     sidebar.append(&sidebar_row("apps", "Applications & Processes", "lucide-apps"));
     sidebar.append(&sidebar_row("svcall", "All Services", "lucide-server"));
     sidebar.append(&sidebar_row("ssh", "SSH Manager", "lucide-terminal"));
+    sidebar.append(&sidebar_row("logs", "System Logs", "lucide-scroll-text"));
 
     // Section headers rendered above rows via the header func — this adds no
     // selectable rows, so the absolute index math in rebuild_dynamic (which
