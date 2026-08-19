@@ -390,21 +390,26 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         super().__init__(*args, **kwargs)
         self.set_title("Tweaks ASUS TUF")
         self.set_icon_name("com.rezkycodes.BatteryManager")
-        self.set_default_size(560, 820)
+        self.set_default_size(580, 840)
 
         # Internal state & guards
         self._updating = False
         self._rgb_slider_updating = False
+        self._mouse_slider_updating = False
         self._debounce_timer_id = None
-        
+
         self.current_power_mode = "powersave" # powersave | performance | auto
-        self.gpu_mode = "hybrid"               # hybrid | integrated | dedicated
-        self.rgb_mode = "0"                    # 0=Static, 1=Breathing, 2=Cycle, 3=Strobe, 10=Pulse
+        self.gpu_mode = "hybrid"         # hybrid | integrated | dedicated
+        self.rgb_mode = "0"              # 0=Static, 1=Breathing, 2=Cycle, 3=Strobe, 10=Pulse
         self.rgb_r = 0
         self.rgb_g = 200
         self.rgb_b = 255
-        self.rgb_speed = "1"                   # 0=Slow, 1=Med, 2=Fast
-        self.rgb_brightness = 3                # 0-3
+        self.rgb_speed = "1"             # 0=Slow, 1=Med, 2=Fast
+        self.rgb_brightness = 3          # 0-3
+
+        self.mouse_hz = "1000"           # 1000, 500, 250, 125
+        self.mouse_dpi = 1600            # 200-12000
+        self.mouse_onboard = "off"       # off (Disabled) | on (Profile 1)
 
         self.load_saved_configs()
 
@@ -437,7 +442,6 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         stack_power = self.stack.add_titled(self.page_power, "power", "Daya & Baterai")
         stack_power.set_icon_name("lucide-battery-charging")
 
-        # ── Group 1: Status Baterai ──────────────────────────────
         group_battery = Adw.PreferencesGroup()
         group_battery.set_title("Status Baterai & Daya")
         self.page_power.add(group_battery)
@@ -468,7 +472,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.row_health.set_icon_name("lucide-heart-pulse")
         group_battery.add(self.row_health)
 
-        # ── Group 2: Mode Manajemen GPU (Hybrid / AMD / NVIDIA) ───
+        # Group 2: Mode Manajemen GPU
         group_gpu = Adw.PreferencesGroup()
         group_gpu.set_title("Manajemen & Mode GPU (Hybrid / AMD / NVIDIA)")
         group_gpu.set_description("Atur peran grafis antara AMD Vega iGPU dan NVIDIA GTX 1660 Ti dGPU")
@@ -489,15 +493,12 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         box_gpu_btns.set_valign(Gtk.Align.CENTER)
 
         self.btn_gpu_hybrid = Gtk.Button(label="⚡ Hybrid")
-        self.btn_gpu_hybrid.set_tooltip_text("Mode seimbang (AMD untuk desktop, NVIDIA otomatis saat dibutuhkan)")
         self.btn_gpu_hybrid.connect("clicked", lambda b: self.set_gpu_mode("hybrid"))
 
         self.btn_gpu_amd = Gtk.Button(label="🍃 AMD Only")
-        self.btn_gpu_amd.set_tooltip_text("Mode hemat daya total (Hanya menggunakan AMD iGPU)")
         self.btn_gpu_amd.connect("clicked", lambda b: self.set_gpu_mode("integrated"))
 
         self.btn_gpu_nvidia = Gtk.Button(label="🚀 NVIDIA")
-        self.btn_gpu_nvidia.set_tooltip_text("Mode performa grafis penuh (NVIDIA selalu siaga penuh)")
         self.btn_gpu_nvidia.connect("clicked", lambda b: self.set_gpu_mode("dedicated"))
 
         box_gpu_btns.append(self.btn_gpu_hybrid)
@@ -512,16 +513,15 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         row_gpu_hint.set_icon_name("lucide-flame")
         group_gpu.add(row_gpu_hint)
 
-        # ── Group 3: Mode Performa CPU (Harmonized State-Aware Buttons) ───
+        # Group 3: Mode Performa CPU
         group_modes = Adw.PreferencesGroup()
         group_modes.set_title("Kontrol Mode Performa & Daya")
         group_modes.set_description("Pilih profil performa prosesor (Biru = Aktif, Abu-abu = Pilihan)")
         self.page_power.add(group_modes)
 
-        # Mode Powersave Row
         row_ps = Adw.ActionRow()
         row_ps.set_title("Mode Hemat Daya (Powersave)")
-        row_ps.set_subtitle("CPU dibatasi 1.7–2.5 GHz, Turbo OFF, Profil Quiet")
+        row_ps.set_subtitle("CPU dibatasi 2.9 GHz, Turbo OFF, Profil Quiet")
         row_ps.set_icon_name("lucide-leaf")
         row_ps.set_activatable(True)
         row_ps.connect("activated", lambda r: self.set_mode("powersave"))
@@ -532,7 +532,6 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         row_ps.add_suffix(self.btn_mode_ps)
         group_modes.add(row_ps)
 
-        # Mode Performance Row
         row_perf = Adw.ActionRow()
         row_perf.set_title("Mode Performa Penuh (Performance)")
         row_perf.set_subtitle("CPU Maksimal 4.3 GHz, Turbo ON, Profil Performance")
@@ -546,7 +545,6 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         row_perf.add_suffix(self.btn_mode_perf)
         group_modes.add(row_perf)
 
-        # Mode Auto Row
         row_auto = Adw.ActionRow()
         row_auto.set_title("Mode Otomatis (Auto-Switch)")
         row_auto.set_subtitle("Performa saat colok charger, Hemat saat baterai")
@@ -560,7 +558,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         row_auto.add_suffix(self.btn_mode_auto)
         group_modes.add(row_auto)
 
-        # ── Group 4: Kontrol Kipas (Harmonized State-Aware Buttons) ────────
+        # Group 4: Kontrol Kipas
         group_fan = Adw.PreferencesGroup()
         group_fan.set_title("Kontrol Kipas & Pendingin (Dual Fan)")
         self.page_power.add(group_fan)
@@ -594,7 +592,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.row_fan_ctrl.add_suffix(box_fan_btns)
         group_fan.add(self.row_fan_ctrl)
 
-        # ── Group 5: Fitur Hardware & Server ─────────────────────
+        # Group 5: Fitur Hardware & Server
         group_hw = Adw.PreferencesGroup()
         group_hw.set_title("Fitur Hardware & Server")
         self.page_power.add(group_hw)
@@ -946,6 +944,113 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             }
             group_sys_srv.add(row_s)
 
+        # ══════════════════════════════════════════════════════════
+        # TAB 4: MOUSE LOGITECH (G304 LIGHTSPEED MANAGER)
+        # ══════════════════════════════════════════════════════════
+        self.page_mouse = Adw.PreferencesPage()
+        stack_mouse = self.stack.add_titled(self.page_mouse, "mouse", "Mouse Logitech")
+        stack_mouse.set_icon_name("lucide-mouse")
+
+        # ── Group 1: Status & Telemetri Mouse ─────────────────────
+        group_m_status = Adw.PreferencesGroup()
+        group_m_status.set_title("Logitech G304 Lightspeed Wireless")
+        group_m_status.set_description("Koneksi receiver USB 046d:C53F • Protocol HID++ 4.2")
+        self.page_mouse.add(group_m_status)
+
+        self.row_m_bat = Adw.ActionRow()
+        self.row_m_bat.set_title("Baterai Mouse G304")
+        self.row_m_bat.set_subtitle("Memuat status...")
+        self.row_m_bat.set_icon_name("lucide-battery-charging")
+
+        self.m_level_bar = Gtk.LevelBar()
+        self.m_level_bar.set_min_value(0.0)
+        self.m_level_bar.set_max_value(100.0)
+        self.m_level_bar.set_value(90.0)
+        self.m_level_bar.set_size_request(100, 16)
+        self.m_level_bar.set_valign(Gtk.Align.CENTER)
+        self.row_m_bat.add_suffix(self.m_level_bar)
+        group_m_status.add(self.row_m_bat)
+
+        # ── Group 2: Polling Rate / Kecepatan Hz ─────────────────
+        group_m_hz = Adw.PreferencesGroup()
+        group_m_hz.set_title("Polling Rate (Frekuensi Transfer Data Hz)")
+        group_m_hz.set_description("Atur kecepatan laporan posisi mouse ke sistem (Semakin tinggi semakin responsif)")
+        self.page_mouse.add(group_m_hz)
+
+        self.row_m_hz = Adw.ActionRow()
+        self.row_m_hz.set_title("Kecepatan Polling Rate saat Ini")
+        self.row_m_hz.set_subtitle("1000 Hz (1 ms - Performa Gaming Peak)")
+        self.row_m_hz.set_icon_name("lucide-gauge")
+
+        box_hz_btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        box_hz_btns.set_valign(Gtk.Align.CENTER)
+        self.hz_buttons = {}
+        for h_val, h_lbl, h_ms in [("1000", "1000 Hz", "1ms"), ("500", "500 Hz", "2ms"), ("250", "250 Hz", "4ms"), ("125", "125 Hz", "8ms")]:
+            btn = Gtk.Button(label=h_lbl)
+            btn.set_tooltip_text(f"Set Polling Rate ke {h_lbl} ({h_ms})")
+            if h_val == self.mouse_hz:
+                btn.add_css_class("suggested-action")
+            btn.connect("clicked", lambda w, hz=h_val, ms=h_ms: self.set_mouse_hz(hz, ms))
+            self.hz_buttons[h_val] = btn
+            box_hz_btns.append(btn)
+        self.row_m_hz.add_suffix(box_hz_btns)
+        group_m_hz.add(self.row_m_hz)
+
+        # ── Group 3: Sensitivitas DPI ────────────────────────────
+        group_m_dpi = Adw.PreferencesGroup()
+        group_m_dpi.set_title("Sensitivitas Sensor Optik (DPI)")
+        self.page_mouse.add(group_m_dpi)
+
+        self.row_m_dpi = Adw.ActionRow()
+        self.row_m_dpi.set_title("Nilai DPI Saat Ini")
+        self.row_m_dpi.set_subtitle(f"{self.mouse_dpi} DPI")
+        self.row_m_dpi.set_icon_name("lucide-sliders")
+
+        self.scale_dpi = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 200, 12000, 50)
+        self.scale_dpi.set_value(self.mouse_dpi)
+        self.scale_dpi.set_size_request(180, -1)
+        self.scale_dpi.set_valign(Gtk.Align.CENTER)
+        self.scale_dpi.connect("value-changed", self.on_dpi_slider_changed)
+        self.row_m_dpi.add_suffix(self.scale_dpi)
+        group_m_dpi.add(self.row_m_dpi)
+
+        row_dpi_presets = Adw.ActionRow()
+        row_dpi_presets.set_title("Preset DPI Populer")
+        row_dpi_presets.set_subtitle("Klik preset untuk mengubah sensitivitas seketika")
+        row_dpi_presets.set_icon_name("lucide-zap")
+
+        box_dpi_btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        box_dpi_btns.set_valign(Gtk.Align.CENTER)
+        for dpi_v in [400, 800, 1600, 3200, 6400]:
+            btn = Gtk.Button(label=f"{dpi_v}")
+            btn.connect("clicked", lambda w, v=dpi_v: self.set_mouse_dpi(v))
+            box_dpi_btns.append(btn)
+        row_dpi_presets.add_suffix(box_dpi_btns)
+        group_m_dpi.add(row_dpi_presets)
+
+        # ── Group 4: Onboard Memory & Proteksi USB ───────────────
+        group_m_memory = Adw.PreferencesGroup()
+        group_m_memory.set_title("Profil Onboard Memory & Anti-Lag USB")
+        self.page_mouse.add(group_m_memory)
+
+        self.switch_onboard = Adw.SwitchRow()
+        self.switch_onboard.set_title("Profil Onboard Memory (EEPROM)")
+        self.switch_onboard.set_subtitle("Gunakan profil yang tersimpan langsung di dalam memori fisik mouse G304")
+        self.switch_onboard.set_icon_name("lucide-database")
+        self.switch_onboard.connect("notify::active", self.on_onboard_toggled)
+        group_m_memory.add(self.switch_onboard)
+
+        row_m_usbalways = Adw.ActionRow()
+        row_m_usbalways.set_title("Proteksi USB Autosuspend (Anti Micro-Stutter)")
+        row_m_usbalways.set_subtitle("Receiver USB G304 selalu dikunci di mode Power ON (Bebas Lag 100%)")
+        row_m_usbalways.set_icon_name("lucide-shield-check")
+        lbl_m_usb = Gtk.Label(label="Aktif")
+        lbl_m_usb.add_css_class("success")
+        lbl_m_usb.add_css_class("heading")
+        lbl_m_usb.set_valign(Gtk.Align.CENTER)
+        row_m_usbalways.add_suffix(lbl_m_usb)
+        group_m_memory.add(row_m_usbalways)
+
         # Explicitly make "power" tab visible on startup
         self.stack.set_visible_child_name("power")
 
@@ -953,9 +1058,63 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.update_status()
         GLib.timeout_add_seconds(3, self.auto_refresh_tick)
 
-    def open_service_detail(self, unit, title, is_user):
-        win = ServiceDetailWindow(self, unit, title, is_user)
-        win.present()
+    # ── Mouse Handlers ─────────────────────────────────────────
+    def set_mouse_hz(self, hz_val, ms_val):
+        self.mouse_hz = hz_val
+        for val, btn in self.hz_buttons.items():
+            if val == hz_val:
+                btn.add_css_class("suggested-action")
+            else:
+                btn.remove_css_class("suggested-action")
+        try:
+            subprocess.run([get_script_path("battery-mouse-logitech.sh"), "hz", hz_val], check=True)
+            self.show_toast(f"Polling Rate Mouse: {hz_val} Hz ({ms_val})")
+            self.update_status()
+        except Exception as e:
+            self.show_toast(f"Gagal mengatur Hz: {e}")
+
+    def set_mouse_dpi(self, dpi_val):
+        self.mouse_dpi = dpi_val
+        self._mouse_slider_updating = True
+        self.scale_dpi.set_value(dpi_val)
+        self._mouse_slider_updating = False
+        try:
+            subprocess.run([get_script_path("battery-mouse-logitech.sh"), "dpi", str(dpi_val)], check=True)
+            self.show_toast(f"DPI Mouse Diatur ke: {dpi_val} DPI")
+            self.update_status()
+        except Exception as e:
+            self.show_toast(f"Gagal mengatur DPI: {e}")
+
+    def on_dpi_slider_changed(self, scale):
+        if self._mouse_slider_updating or self._updating:
+            return
+        dpi_val = int(scale.get_value())
+        self.mouse_dpi = dpi_val
+        self.row_m_dpi.set_subtitle(f"{dpi_val} DPI")
+        
+        if self._debounce_timer_id is not None:
+            GLib.source_remove(self._debounce_timer_id)
+        self._debounce_timer_id = GLib.timeout_add(80, lambda: self._apply_mouse_dpi_debounced(dpi_val))
+
+    def _apply_mouse_dpi_debounced(self, dpi_val):
+        self._debounce_timer_id = None
+        try:
+            subprocess.run([get_script_path("battery-mouse-logitech.sh"), "dpi", str(dpi_val)], check=True)
+        except Exception:
+            pass
+        return False
+
+    def on_onboard_toggled(self, switch_row, gparam):
+        if self._updating:
+            return
+        val = "1" if switch_row.get_active() else "off"
+        try:
+            subprocess.run([get_script_path("battery-mouse-logitech.sh"), "onboard", val], check=True)
+            st_msg = "Onboard Memory Profile 1 Aktif" if val == "1" else "Mode Software Solaar Aktif"
+            self.show_toast(f"Mode Mouse: {st_msg}")
+            self.update_status()
+        except Exception as e:
+            self.show_toast(f"Gagal mengubah mode onboard: {e}")
 
     # ── Cairo Drawing Functions ────────────────────────────────
     def draw_palette_circle(self, area, cr, width, height, user_data):
@@ -1162,7 +1321,6 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
                 fan_mode_label = "Silent / Hening (Kecepatan Rendah)"
             self.row_fan_ctrl.set_subtitle(f"Status Aktif: {fan_mode_label}")
 
-            # Harmonize fan buttons: active is suggested-action (blue), inactive is neutral gray
             self.btn_fan_silent.remove_css_class("suggested-action")
             self.btn_fan_normal.remove_css_class("suggested-action")
             self.btn_fan_turbo.remove_css_class("suggested-action")
@@ -1202,7 +1360,10 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
 
             self.row_cpu.set_subtitle(f"Governor: {gov.upper()} @ {freq_mhz} MHz | Turbo: {boost} | Profil: {profile}")
 
-            # 8. Update Systemd Services Tab
+            # 8. Update Logitech Mouse Status
+            self.update_mouse_status()
+
+            # 9. Update Systemd Services Tab
             self.update_services_status()
 
         except Exception:
@@ -1210,8 +1371,62 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         finally:
             self._updating = False
 
+    def update_mouse_status(self):
+        m_bat = "90"
+        m_status = "Discharging"
+        m_hz = "1000"
+        m_dpi = "1600"
+        m_onboard = False
+
+        try:
+            if os.path.exists("/sys/class/power_supply/hidpp_battery_0/capacity"):
+                with open("/sys/class/power_supply/hidpp_battery_0/capacity") as f:
+                    m_bat = f.read().strip()
+            if os.path.exists("/sys/class/power_supply/hidpp_battery_0/status"):
+                with open("/sys/class/power_supply/hidpp_battery_0/status") as f:
+                    m_status = f.read().strip()
+        except Exception:
+            pass
+
+        try:
+            sol_out = subprocess.check_output([get_script_path("battery-mouse-logitech.sh"), "status"], text=True, timeout=1.5)
+            for line in sol_out.splitlines():
+                line_str = line.strip()
+                if "report_rate" in line_str or "Report Rate" in line_str:
+                    if "1ms" in line_str: m_hz = "1000"
+                    elif "2ms" in line_str: m_hz = "500"
+                    elif "4ms" in line_str: m_hz = "250"
+                    elif "8ms" in line_str: m_hz = "125"
+                elif "dpi =" in line_str:
+                    m_dpi = line_str.split("=")[1].strip()
+                elif "onboard_profiles =" in line_str:
+                    m_onboard = ("Profile" in line_str)
+        except Exception:
+            pass
+
+        m_pct_num = float(m_bat) if m_bat.isdigit() else 90.0
+        self.m_level_bar.set_value(m_pct_num)
+
+        self.row_m_bat.set_title(f"Baterai Mouse G304: {m_bat}%")
+        self.row_m_bat.set_subtitle(f"Status: {m_status} • Koneksi: Lightspeed Receiver")
+
+        self.row_m_hz.set_subtitle(f"Aktif: {m_hz} Hz ({'1ms Peak' if m_hz=='1000' else 'Hemat Baterai'})")
+
+        if not self._mouse_slider_updating:
+            dpi_int = int(m_dpi) if m_dpi.isdigit() else 1600
+            self.row_m_dpi.set_subtitle(f"{dpi_int} DPI")
+            self.scale_dpi.set_value(dpi_int)
+
+        for hz_k, btn in self.hz_buttons.items():
+            if hz_k == m_hz:
+                btn.add_css_class("suggested-action")
+            else:
+                btn.remove_css_class("suggested-action")
+
+        if self.switch_onboard.get_active() != m_onboard:
+            self.switch_onboard.set_active(m_onboard)
+
     def update_power_mode_buttons(self):
-        # Determine actual CPU power state if not explicitly saved
         try:
             gov = ""
             boost_val = "1"
@@ -1229,7 +1444,6 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         except Exception:
             pass
 
-        # Reset all 3 buttons to neutral gray
         self.btn_mode_ps.remove_css_class("suggested-action")
         self.btn_mode_ps.set_label("Pilih")
 
@@ -1239,7 +1453,6 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self.btn_mode_auto.remove_css_class("suggested-action")
         self.btn_mode_auto.set_label("Pilih")
 
-        # Highlight currently active mode in blue (suggested-action)
         if self.current_power_mode == "powersave":
             self.btn_mode_ps.add_css_class("suggested-action")
             self.btn_mode_ps.set_label("✓ Aktif")
@@ -1411,11 +1624,10 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             cmd = ["sudo", "-n", get_script_path("battery-udev-handler.sh")]
             msg = "⚡ Mode Otomatis Berhasil Diterapkan!"
 
-        # Persist power mode
         try:
             conf_dir = "/etc/asus-power-manager"
             os.makedirs(conf_dir, exist_ok=True)
-            with open(f"{conf_dir}/power_mode.conf", "w") as f:
+            with open(os.path.join(conf_dir, "power_mode.conf"), "w") as f:
                 f.write("POWER_MODE=" + str(mode) + "\n")
         except Exception:
             pass
