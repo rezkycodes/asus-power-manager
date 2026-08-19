@@ -1650,6 +1650,9 @@ fn build_svc_group(
 }
 
 fn build_ui(app: &adw::Application) {
+    // Force full-dark scheme regardless of the system theme.
+    adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
+
     let logical = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     let shared = Arc::new(Mutex::new(Shared {
         logical,
@@ -1947,7 +1950,13 @@ fn build_ui(app: &adw::Application) {
     // CSS
     let provider = gtk::CssProvider::new();
     provider.load_from_data(
-        ".cpu-graph-frame { border: 1px solid rgba(41,128,236,0.55); border-radius: 6px; \
+        "window, .background, headerbar, .view, viewswitcher, stackswitcher, \
+         scrolledwindow, textview, textview text, preferencespage, clamp, viewport { \
+         background-color: #000000; } \
+         headerbar { box-shadow: none; border-bottom: 1px solid rgba(255,255,255,0.06); } \
+         list, .boxed-list, .card, row { background-color: #000000; } \
+         .boxed-list, .card { border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; } \
+         .cpu-graph-frame { border: 1px solid rgba(41,128,236,0.55); border-radius: 6px; \
          background-color: rgba(41,128,236,0.06); } \
          scale.red-slider highlight { background: #ff3b30; } \
          scale.green-slider highlight { background: #34c759; } \
