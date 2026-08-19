@@ -4,6 +4,8 @@ import subprocess
 import os
 import glob
 import math
+import threading
+import time
 import gi
 
 gi.require_version('Gtk', '4.0')
@@ -397,6 +399,18 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         self._rgb_slider_updating = False
         self._mouse_slider_updating = False
         self._debounce_timer_id = None
+
+        # Background poller: slow subprocess results are gathered off the UI
+        # thread and stored here. The 3s UI refresh only reads this cache +
+        # fast sysfs, so the GTK main loop never blocks (fixes "Not Responding").
+        self._cache = {
+            "upower": {"energy_rate": "", "health_cap": "", "time_str": ""},
+            "gpu": {"temp": "--", "pwr": "--", "vram": "--", "pstate": "--", "util": "--"},
+            "mouse": {"hz": "1000", "dpi": "1600", "onboard": False},
+            "services": {},
+        }
+        self._poll_wake = threading.Event()
+        self._poll_stop = False
 
         self.current_power_mode = "powersave" # powersave | performance | auto
         self.gpu_mode = "hybrid"         # hybrid | integrated | dedicated
@@ -1054,6 +1068,14 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         # Explicitly make "power" tab visible on startup
         self.stack.set_visible_child_name("power")
 
+        # Start background poller for slow subprocesses (upower, nvidia-smi,
+        # solaar, systemctl). The daemon thread runs its first poll immediately
+        # and keeps the cache fresh; the UI shows cached/default values until
+        # then, so window creation is never blocked.
+        self._poller = threading.Thread(target=self._bg_poller, daemon=True)
+        self._poller.start()
+        self.connect("close-request", self._on_close)
+
         # Initial Update & 3s Loop
         self.update_status()
         GLib.timeout_add_seconds(3, self.auto_refresh_tick)
@@ -1066,24 +1088,20 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
                 btn.add_css_class("suggested-action")
             else:
                 btn.remove_css_class("suggested-action")
-        try:
-            subprocess.run([get_script_path("battery-mouse-logitech.sh"), "hz", hz_val], check=True)
-            self.show_toast(f"Polling Rate Mouse: {hz_val} Hz ({ms_val})")
-            self.update_status()
-        except Exception as e:
-            self.show_toast(f"Gagal mengatur Hz: {e}")
+        # Optimistic cache update so the UI doesn't flicker back to old value
+        self._cache.get("mouse", {})["hz"] = hz_val
+        self._run_cmd_async([get_script_path("battery-mouse-logitech.sh"), "hz", hz_val])
+        self.show_toast(f"Polling Rate Mouse: {hz_val} Hz ({ms_val})")
 
     def set_mouse_dpi(self, dpi_val):
         self.mouse_dpi = dpi_val
         self._mouse_slider_updating = True
         self.scale_dpi.set_value(dpi_val)
+        self.row_m_dpi.set_subtitle(f"{dpi_val} DPI")
         self._mouse_slider_updating = False
-        try:
-            subprocess.run([get_script_path("battery-mouse-logitech.sh"), "dpi", str(dpi_val)], check=True)
-            self.show_toast(f"DPI Mouse Diatur ke: {dpi_val} DPI")
-            self.update_status()
-        except Exception as e:
-            self.show_toast(f"Gagal mengatur DPI: {e}")
+        self._cache.get("mouse", {})["dpi"] = str(dpi_val)
+        self._run_cmd_async([get_script_path("battery-mouse-logitech.sh"), "dpi", str(dpi_val)])
+        self.show_toast(f"DPI Mouse Diatur ke: {dpi_val} DPI")
 
     def on_dpi_slider_changed(self, scale):
         if self._mouse_slider_updating or self._updating:
@@ -1091,30 +1109,26 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         dpi_val = int(scale.get_value())
         self.mouse_dpi = dpi_val
         self.row_m_dpi.set_subtitle(f"{dpi_val} DPI")
-        
+
         if self._debounce_timer_id is not None:
             GLib.source_remove(self._debounce_timer_id)
-        self._debounce_timer_id = GLib.timeout_add(80, lambda: self._apply_mouse_dpi_debounced(dpi_val))
+        self._debounce_timer_id = GLib.timeout_add(120, lambda: self._apply_mouse_dpi_debounced(dpi_val))
 
     def _apply_mouse_dpi_debounced(self, dpi_val):
         self._debounce_timer_id = None
-        try:
-            subprocess.run([get_script_path("battery-mouse-logitech.sh"), "dpi", str(dpi_val)], check=True)
-        except Exception:
-            pass
+        self._cache.get("mouse", {})["dpi"] = str(dpi_val)
+        self._run_cmd_async([get_script_path("battery-mouse-logitech.sh"), "dpi", str(dpi_val)])
         return False
 
     def on_onboard_toggled(self, switch_row, gparam):
         if self._updating:
             return
-        val = "1" if switch_row.get_active() else "off"
-        try:
-            subprocess.run([get_script_path("battery-mouse-logitech.sh"), "onboard", val], check=True)
-            st_msg = "Onboard Memory Profile 1 Aktif" if val == "1" else "Mode Software Solaar Aktif"
-            self.show_toast(f"Mode Mouse: {st_msg}")
-            self.update_status()
-        except Exception as e:
-            self.show_toast(f"Gagal mengubah mode onboard: {e}")
+        active = switch_row.get_active()
+        val = "1" if active else "off"
+        self._cache.get("mouse", {})["onboard"] = active
+        self._run_cmd_async([get_script_path("battery-mouse-logitech.sh"), "onboard", val])
+        st_msg = "Onboard Memory Profile 1 Aktif" if active else "Mode Software Solaar Aktif"
+        self.show_toast(f"Mode Mouse: {st_msg}")
 
     # ── Cairo Drawing Functions ────────────────────────────────
     def draw_palette_circle(self, area, cr, width, height, user_data):
@@ -1201,6 +1215,119 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
                 btn.remove_css_class("suggested-action")
                 btn.set_label("Pilih")
 
+    def _poll_once(self):
+        """Gather all slow subprocess data off the UI thread into a fresh cache
+        dict, then swap it in atomically. Every call is bounded by timeouts so a
+        hung solaar/nvidia-smi/systemctl only delays a cache refresh — it can
+        never block the GTK main loop."""
+        cache = {
+            "upower": {"energy_rate": "", "health_cap": "", "time_str": ""},
+            "gpu": {"temp": "--", "pwr": "--", "vram": "--", "pstate": "--", "util": "--"},
+            "mouse": {"hz": "1000", "dpi": "1600", "onboard": False},
+            "services": {},
+        }
+
+        # UPower (battery health, drain rate, time-to-empty)
+        try:
+            bat_path = subprocess.check_output(
+                "upower -e | grep BAT | head -1", shell=True, text=True, timeout=4
+            ).strip()
+            if bat_path:
+                uinfo = subprocess.check_output(["upower", "-i", bat_path], text=True, timeout=4)
+                for line in uinfo.splitlines():
+                    line = line.strip()
+                    if line.startswith("energy-rate:"):
+                        cache["upower"]["energy_rate"] = line.split(":", 1)[1].strip()
+                    elif line.startswith("capacity:"):
+                        cache["upower"]["health_cap"] = line.split(":", 1)[1].strip()
+                    elif "time to" in line:
+                        cache["upower"]["time_str"] = line.split(":", 1)[1].strip()
+        except Exception:
+            pass
+
+        # NVIDIA GPU telemetry
+        try:
+            smi_out = subprocess.check_output(
+                ["nvidia-smi", "--query-gpu=temperature.gpu,power.draw,memory.used,memory.total,utilization.gpu,pstate", "--format=csv,noheader,nounits"],
+                text=True, timeout=4
+            ).strip()
+            parts = [p.strip() for p in smi_out.split(",")]
+            if len(parts) >= 6:
+                t, pwr, used, tot, util, pstate = parts[:6]
+                try:
+                    pwr = f"{float(pwr):.1f} W"
+                except Exception:
+                    pwr = f"{pwr} W"
+                cache["gpu"] = {
+                    "temp": f"{t}°C",
+                    "pwr": pwr,
+                    "vram": f"{used}/{tot} MB",
+                    "util": f"{util}%",
+                    "pstate": pstate,
+                }
+        except Exception:
+            pass
+
+        # Logitech G304 via solaar-backed script (key=value output)
+        try:
+            sol_out = subprocess.check_output(
+                [get_script_path("battery-mouse-logitech.sh"), "status"], text=True, timeout=6
+            )
+            for line in sol_out.splitlines():
+                if "=" in line:
+                    k, v = line.strip().split("=", 1)
+                    if k == "HZ":
+                        cache["mouse"]["hz"] = v
+                    elif k == "DPI":
+                        cache["mouse"]["dpi"] = v
+                    elif k == "ONBOARD":
+                        cache["mouse"]["onboard"] = (v == "on")
+        except Exception:
+            pass
+
+        # Systemd service states (user + system)
+        svc = {}
+        for key, s_data in list(self.service_widgets.items()):
+            unit = s_data["unit"]
+            is_user = s_data["is_user"]
+            cmd = ["systemctl", "--user", "is-active", unit] if is_user else ["systemctl", "is-active", unit]
+            try:
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=4)
+                svc[key] = res.stdout.strip() or "inactive"
+            except Exception:
+                svc[key] = "unknown"
+        cache["services"] = svc
+
+        self._cache = cache  # atomic swap (GIL-safe reference assignment)
+
+    def _bg_poller(self):
+        while not self._poll_stop:
+            try:
+                self._poll_once()
+            except Exception:
+                pass
+            # Sleep up to 3s, but wake early when a setter requests a refresh
+            self._poll_wake.wait(timeout=3)
+            self._poll_wake.clear()
+
+    def _run_cmd_async(self, cmd, wake=True):
+        """Run a hardware-write command in a short-lived daemon thread so a slow
+        solaar/sudo call never blocks the UI. Refreshes the poller cache after."""
+        def worker():
+            try:
+                subprocess.run(cmd, check=False, timeout=10,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+            if wake:
+                self._poll_wake.set()
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_close(self, *args):
+        self._poll_stop = True
+        self._poll_wake.set()
+        return False
+
     def auto_refresh_tick(self):
         self.update_status()
         return True
@@ -1241,24 +1368,11 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
                     thresh_val = f.read().strip()
                 break
 
-            # 2. Read UPower
-            energy_rate = ""
-            health_cap = ""
-            time_str = ""
-            try:
-                bat_path = subprocess.check_output("upower -e | grep BAT | head -1", shell=True, text=True).strip()
-                if bat_path:
-                    uinfo = subprocess.check_output(f"upower -i '{bat_path}'", shell=True, text=True)
-                    for line in uinfo.splitlines():
-                        line = line.strip()
-                        if line.startswith("energy-rate:"):
-                            energy_rate = line.split(":")[1].strip()
-                        elif line.startswith("capacity:"):
-                            health_cap = line.split(":")[1].strip()
-                        elif "time to" in line:
-                            time_str = line.split(":")[1].strip()
-            except Exception:
-                pass
+            # 2. UPower data (gathered by background poller — no blocking here)
+            up = self._cache.get("upower", {})
+            energy_rate = up.get("energy_rate", "")
+            health_cap = up.get("health_cap", "")
+            time_str = up.get("time_str", "")
 
             pct_num = float(bat_cap) if bat_cap.isdigit() else 80.0
             self.level_bar.set_value(pct_num)
@@ -1388,21 +1502,12 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         except Exception:
             pass
 
-        try:
-            sol_out = subprocess.check_output([get_script_path("battery-mouse-logitech.sh"), "status"], text=True, timeout=1.5)
-            for line in sol_out.splitlines():
-                line_str = line.strip()
-                if "report_rate" in line_str or "Report Rate" in line_str:
-                    if "1ms" in line_str: m_hz = "1000"
-                    elif "2ms" in line_str: m_hz = "500"
-                    elif "4ms" in line_str: m_hz = "250"
-                    elif "8ms" in line_str: m_hz = "125"
-                elif "dpi =" in line_str:
-                    m_dpi = line_str.split("=")[1].strip()
-                elif "onboard_profiles =" in line_str:
-                    m_onboard = ("Profile" in line_str)
-        except Exception:
-            pass
+        # Polling rate / DPI / onboard come from the background poller
+        # (solaar show is slow and can hang — never call it on the UI thread).
+        mc = self._cache.get("mouse", {})
+        m_hz = mc.get("hz", "1000")
+        m_dpi = mc.get("dpi", "1600")
+        m_onboard = mc.get("onboard", False)
 
         m_pct_num = float(m_bat) if m_bat.isdigit() else 90.0
         self.m_level_bar.set_value(m_pct_num)
@@ -1479,20 +1584,13 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             except Exception:
                 pass
 
-        try:
-            smi_out = subprocess.check_output(
-                ["nvidia-smi", "--query-gpu=temperature.gpu,power.draw,memory.used,memory.total,utilization.gpu,pstate", "--format=csv,noheader,nounits"],
-                text=True, timeout=1.5
-            ).strip()
-            parts = [p.strip() for p in smi_out.split(",")]
-            if len(parts) >= 6:
-                gpu_temp, gpu_pwr, gpu_used, gpu_tot, gpu_util, gpu_pstate = parts
-                gpu_vram = f"{gpu_used}/{gpu_tot} MB"
-                gpu_pwr = f"{float(gpu_pwr):.1f} W"
-                gpu_temp = f"{gpu_temp}°C"
-                gpu_util = f"{gpu_util}%"
-        except Exception:
-            pass
+        # GPU telemetry gathered by background poller (nvidia-smi is slow)
+        g = self._cache.get("gpu", {})
+        gpu_temp = g.get("temp", "--")
+        gpu_pwr = g.get("pwr", "--")
+        gpu_vram = g.get("vram", "--")
+        gpu_pstate = g.get("pstate", "--")
+        gpu_util = g.get("util", "--")
 
         self.row_gpu_telemetry.set_subtitle(f"Suhu: {gpu_temp} • Daya: {gpu_pwr} • VRAM: {gpu_vram} • P-State: {gpu_pstate} ({pci_status})")
 
@@ -1525,40 +1623,40 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             self.show_toast(f"Gagal mengubah mode GPU: {e}")
 
     def update_services_status(self):
+        svc_cache = self._cache.get("services", {})
         for key, s_data in self.service_widgets.items():
-            unit = s_data["unit"]
-            is_user = s_data["is_user"]
             badge = s_data["badge"]
             btn_toggle = s_data["toggle"]
 
-            cmd = ["systemctl", "--user", "is-active", unit] if is_user else ["systemctl", "is-active", unit]
-            try:
-                res = subprocess.run(cmd, capture_output=True, text=True)
-                st = res.stdout.strip()
-                
-                badge.remove_css_class("badge-running")
-                badge.remove_css_class("badge-stopped")
-                badge.remove_css_class("badge-failed")
-                btn_toggle.remove_css_class("destructive-action")
-                btn_toggle.remove_css_class("suggested-action")
+            # State gathered by background poller (systemctl is-active x N is slow)
+            st = svc_cache.get(key)
+            if st is None:
+                # Not polled yet — leave current visual state untouched
+                continue
 
-                if st == "active":
-                    badge.set_text("Aktif")
-                    badge.add_css_class("badge-running")
-                    btn_toggle.set_label("Stop")
-                    btn_toggle.add_css_class("destructive-action")
-                elif st == "failed":
-                    badge.set_text("Gagal")
-                    badge.add_css_class("badge-failed")
-                    btn_toggle.set_label("Start")
-                    btn_toggle.add_css_class("suggested-action")
-                else:
-                    badge.set_text("Mati")
-                    badge.add_css_class("badge-stopped")
-                    btn_toggle.set_label("Start")
-                    btn_toggle.add_css_class("suggested-action")
-            except Exception:
+            badge.remove_css_class("badge-running")
+            badge.remove_css_class("badge-stopped")
+            badge.remove_css_class("badge-failed")
+            btn_toggle.remove_css_class("destructive-action")
+            btn_toggle.remove_css_class("suggested-action")
+
+            if st == "active":
+                badge.set_text("Aktif")
+                badge.add_css_class("badge-running")
+                btn_toggle.set_label("Stop")
+                btn_toggle.add_css_class("destructive-action")
+            elif st == "failed":
+                badge.set_text("Gagal")
+                badge.add_css_class("badge-failed")
+                btn_toggle.set_label("Start")
+                btn_toggle.add_css_class("suggested-action")
+            elif st == "unknown":
                 badge.set_text("Unknown")
+            else:
+                badge.set_text("Mati")
+                badge.add_css_class("badge-stopped")
+                btn_toggle.set_label("Start")
+                btn_toggle.add_css_class("suggested-action")
 
     def toggle_service_state(self, unit, is_user):
         cmd_chk = ["systemctl", "--user", "is-active", unit] if is_user else ["systemctl", "is-active", unit]
