@@ -2121,6 +2121,7 @@ struct SvcW {
     is_user: bool,
     unit: String,
     badge: gtk::Label,
+    dot: gtk::Label,
     toggle: gtk::Button,
 }
 
@@ -2428,29 +2429,36 @@ impl Ui {
             s.badge.remove_css_class("badge-run");
             s.badge.remove_css_class("badge-stop");
             s.badge.remove_css_class("badge-fail");
+            s.dot.remove_css_class("dot-run");
+            s.dot.remove_css_class("dot-stop");
+            s.dot.remove_css_class("dot-fail");
             s.toggle.remove_css_class("destructive-action");
             s.toggle.remove_css_class("suggested-action");
             match state {
                 "active" => {
                     s.badge.set_text("Active");
                     s.badge.add_css_class("badge-run");
+                    s.dot.add_css_class("dot-run");
                     s.toggle.set_label("Stop");
                     s.toggle.add_css_class("destructive-action");
                 }
                 "failed" => {
                     s.badge.set_text("Failed");
                     s.badge.add_css_class("badge-fail");
+                    s.dot.add_css_class("dot-fail");
                     s.toggle.set_label("Start");
                     s.toggle.add_css_class("suggested-action");
                 }
                 "unknown" => {
                     s.badge.set_text("Unknown");
                     s.badge.add_css_class("badge-stop");
+                    s.dot.add_css_class("dot-stop");
                     s.toggle.set_label("Start");
                 }
                 _ => {
                     s.badge.set_text("Off");
                     s.badge.add_css_class("badge-stop");
+                    s.dot.add_css_class("dot-stop");
                     s.toggle.set_label("Start");
                     s.toggle.add_css_class("suggested-action");
                 }
@@ -3630,6 +3638,12 @@ fn build_svc_group(
             .title(*title)
             .subtitle(&format!("Unit: {} • {}", unit, sub).replace('&', "&amp;"))
             .build();
+        // Leading status dot (green = active, red = failed) like `systemctl status`.
+        let dot = gtk::Label::new(Some("●"));
+        dot.add_css_class("svc-dot");
+        dot.add_css_class("dot-stop");
+        dot.set_valign(gtk::Align::Center);
+        row.add_prefix(&dot);
         let bx = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         bx.set_valign(gtk::Align::Center);
         let badge = gtk::Label::new(Some("Loading"));
@@ -3683,6 +3697,7 @@ fn build_svc_group(
             is_user,
             unit: unit.to_string(),
             badge,
+            dot,
             toggle,
         });
     }
@@ -5311,7 +5326,11 @@ fn build_ui(app: &adw::Application) {
          scale.blue-slider highlight { background: #007aff; } \
          .badge-run { background-color: #e6e6e6; color: #000; border-radius: 6px; padding: 2px 10px; font-weight: bold; } \
          .badge-stop { background-color: #3a3a3a; color: #cfcfcf; border-radius: 6px; padding: 2px 10px; font-weight: bold; } \
-         .badge-fail { background-color: #8a8a8a; color: #000; border-radius: 6px; padding: 2px 10px; font-weight: bold; }",
+         .badge-fail { background-color: #8a8a8a; color: #000; border-radius: 6px; padding: 2px 10px; font-weight: bold; } \
+         .svc-dot { font-size: 14px; margin-right: 4px; } \
+         .svc-dot.dot-run { color: #2ec27e; } \
+         .svc-dot.dot-fail { color: #e01b24; } \
+         .svc-dot.dot-stop { color: #5e5c64; }",
     );
     if let Some(display) = gtk::gdk::Display::default() {
         gtk::style_context_add_provider_for_display(&display, &provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
