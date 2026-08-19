@@ -1,5 +1,4 @@
 # Exclude dev-only / archived paths from `git archive` source tarballs
-python-legacy/ export-ignore
 .github/       export-ignore
 .gitattributes export-ignore
 .gitignore     export-ignore
