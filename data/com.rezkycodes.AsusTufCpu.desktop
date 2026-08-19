@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Tweaks ASUS TUF
+GenericName=System Monitor & Hardware Control
+Comment=Monitor CPU, GPU, memory, drives, network, battery and control ASUS TUF hardware
+Exec=/usr/bin/asus-tuf-cpu
+Icon=com.rezkycodes.AsusTufCpu
+Terminal=false
+Categories=System;Monitor;
+Keywords=asus;tuf;cpu;gpu;fan;battery;monitor;power;rgb;
+StartupNotify=true
+StartupWMClass=com.rezkycodes.AsusTufCpu

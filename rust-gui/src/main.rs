@@ -4511,7 +4511,8 @@ fn build_ui(app: &adw::Application) {
 
     let window = adw::ApplicationWindow::builder()
         .application(app)
-        .title("Tweaks ASUS TUF (Rust)")
+        .title("Tweaks ASUS TUF")
+        .icon_name("com.rezkycodes.AsusTufCpu")
         .default_width(920)
         .default_height(860)
         .build();
