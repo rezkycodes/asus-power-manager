@@ -2033,7 +2033,7 @@ fn draw_graph(cr: &gtk::cairo::Context, w: f64, h: f64, data: &VecDeque<f64>, ma
     let stepx = w / (n as f64 - 1.0);
     let yv = |v: f64| h - (v.clamp(0.0, maxv) / maxv) * (h - 2.0) - 1.0;
     cr.set_line_width(1.6);
-    cr.set_source_rgb(0.16, 0.55, 0.96);
+    cr.set_source_rgb(1.0, 1.0, 1.0);
     for (i, v) in data.iter().enumerate() {
         let (x, y) = (i as f64 * stepx, yv(*v));
         if i == 0 {
@@ -2046,7 +2046,7 @@ fn draw_graph(cr: &gtk::cairo::Context, w: f64, h: f64, data: &VecDeque<f64>, ma
     cr.line_to(w, h);
     cr.line_to(0.0, h);
     cr.close_path();
-    cr.set_source_rgba(0.16, 0.55, 0.96, 0.22);
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.15);
     let _ = cr.fill();
 }
 
@@ -4105,7 +4105,7 @@ fn build_net_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &NetInfo) -> (a
                         let yv = |v: f64| h - (v.clamp(0.0, mx) / mx) * (h - 2.0) - 1.0;
                         cr.set_line_width(1.4);
                         cr.set_dash(&[4.0, 3.0], 0.0);
-                        cr.set_source_rgb(0.55, 0.75, 1.0);
+                        cr.set_source_rgb(0.6, 0.6, 0.6);
                         for (i, v) in n.tx_hist.iter().enumerate() {
                             let (x, y) = (i as f64 * stepx, yv(*v));
                             if i == 0 {
@@ -4512,7 +4512,7 @@ fn build_ui(app: &adw::Application) {
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("Tweaks ASUS TUF (Rust)")
-        .default_width(600)
+        .default_width(920)
         .default_height(860)
         .build();
 
@@ -4850,15 +4850,24 @@ fn build_ui(app: &adw::Application) {
     split.set_max_sidebar_width(260.0);
 
     // Collapse toggle in the content header, kept in sync with show-sidebar.
-    let btn_toggle = gtk::ToggleButton::new();
-    btn_toggle.set_icon_name("sidebar-show-symbolic");
-    btn_toggle.set_tooltip_text(Some("Tampilkan / sembunyikan sidebar"));
-    content_header.pack_start(&btn_toggle);
-    split
-        .bind_property("show-sidebar", &btn_toggle, "active")
-        .sync_create()
-        .bidirectional()
-        .build();
+    // Sidebar collapse/expand. Plain buttons flip show-sidebar directly (no
+    // bindable "active" state that can desync and get stuck). When collapsed the
+    // sidebar overlays and covers the content header, so the sidebar header also
+    // carries a hide button — otherwise there is no reachable control to close it.
+    let btn_show = gtk::Button::from_icon_name("sidebar-show-symbolic");
+    btn_show.set_tooltip_text(Some("Tampilkan / sembunyikan sidebar"));
+    content_header.pack_start(&btn_show);
+    {
+        let split = split.clone();
+        btn_show.connect_clicked(move |_| split.set_show_sidebar(!split.shows_sidebar()));
+    }
+    let btn_hide = gtk::Button::from_icon_name("sidebar-show-symbolic");
+    btn_hide.set_tooltip_text(Some("Sembunyikan sidebar"));
+    side_header.pack_start(&btn_hide);
+    {
+        let split = split.clone();
+        btn_hide.connect_clicked(move |_| split.set_show_sidebar(false));
+    }
 
     {
         let stack = stack.clone();
@@ -4912,7 +4921,7 @@ fn build_ui(app: &adw::Application) {
          scrolledwindow, textview, textview text, preferencespage, clamp, viewport { \
          background-color: #000000; } \
          headerbar { box-shadow: none; border-bottom: 1px solid rgba(255,255,255,0.06); } \
-         .svc-run { color: #2ec27e; } .svc-fail { color: #e01b24; } .svc-idle { color: #5e5c64; } \
+         .svc-run { color: #ffffff; } .svc-fail { color: #9a9a9a; } .svc-idle { color: #5e5c64; } \
          scrolledwindow, scrolledwindow > viewport, .navigation-sidebar { border: none; box-shadow: none; } \
          .navigation-sidebar { background-color: #000000; } \
          .navigation-sidebar > row { background-color: transparent; border-radius: 8px; margin: 2px 8px; padding: 2px; } \
@@ -4926,9 +4935,9 @@ fn build_ui(app: &adw::Application) {
          scale.red-slider highlight { background: #ff3b30; } \
          scale.green-slider highlight { background: #34c759; } \
          scale.blue-slider highlight { background: #007aff; } \
-         .badge-run { background-color: #2ec27e; color: #fff; border-radius: 6px; padding: 2px 10px; font-weight: bold; } \
-         .badge-stop { background-color: #5e5c64; color: #fff; border-radius: 6px; padding: 2px 10px; font-weight: bold; } \
-         .badge-fail { background-color: #e01b24; color: #fff; border-radius: 6px; padding: 2px 10px; font-weight: bold; }",
+         .badge-run { background-color: #e6e6e6; color: #000; border-radius: 6px; padding: 2px 10px; font-weight: bold; } \
+         .badge-stop { background-color: #3a3a3a; color: #cfcfcf; border-radius: 6px; padding: 2px 10px; font-weight: bold; } \
+         .badge-fail { background-color: #8a8a8a; color: #000; border-radius: 6px; padding: 2px 10px; font-weight: bold; }",
     );
     if let Some(display) = gtk::gdk::Display::default() {
         gtk::style_context_add_provider_for_display(&display, &provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
