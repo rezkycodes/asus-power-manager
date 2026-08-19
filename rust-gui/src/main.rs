@@ -2118,7 +2118,7 @@ struct Ui {
     stack: adw::ViewStack,
     sidebar: gtk::ListBox,
     dyn_rows: RefCell<Vec<gtk::ListBoxRow>>,
-    dyn_pages: RefCell<Vec<adw::PreferencesPage>>,
+    dyn_pages: RefCell<Vec<gtk::Widget>>,
     dyn_sig: RefCell<String>,
 }
 
@@ -2682,15 +2682,33 @@ impl Ui {
         self.drives.borrow_mut().clear();
 
         let mut pos = 2i32; // after CPU(0), Memory(1)
-        for (i, info) in gpus.iter().enumerate() {
-            let (page, gu) = build_gpu_page(&self.shared, i, info);
-            self.stack.add_titled(&page, Some(&format!("gpu{i}")), &format!("GPU {i}"));
-            let row = sidebar_row(&format!("gpu{i}"), &format!("GPU {i} ({})", info.kind), "lucide-gpu");
+        if !gpus.is_empty() {
+            let inner = adw::ViewStack::new();
+            for (i, info) in gpus.iter().enumerate() {
+                let (page, gu) = build_gpu_page(&self.shared, i, info);
+                inner.add_titled(&page, Some(&format!("g{i}")), &format!("GPU {i} ({})", info.kind));
+                self.gpus.borrow_mut().push(gu);
+            }
+            let container = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            if gpus.len() > 1 {
+                let switcher = adw::ViewSwitcher::builder()
+                    .stack(&inner)
+                    .policy(adw::ViewSwitcherPolicy::Wide)
+                    .build();
+                let bar = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+                bar.set_halign(gtk::Align::Center);
+                bar.set_margin_top(8);
+                bar.set_margin_bottom(4);
+                bar.append(&switcher);
+                container.append(&bar);
+            }
+            container.append(&inner);
+            self.stack.add_titled(&container, Some("gpu"), "GPU");
+            let row = sidebar_row("gpu", "GPU", "lucide-gpu");
             self.sidebar.insert(&row, pos);
             pos += 1;
             self.dyn_rows.borrow_mut().push(row);
-            self.dyn_pages.borrow_mut().push(page);
-            self.gpus.borrow_mut().push(gu);
+            self.dyn_pages.borrow_mut().push(container.upcast());
         }
         for (i, info) in fans.iter().enumerate() {
             let (page, fu) = build_fan_page(&self.shared, i, info);
@@ -2699,7 +2717,7 @@ impl Ui {
             self.sidebar.insert(&row, pos);
             pos += 1;
             self.dyn_rows.borrow_mut().push(row);
-            self.dyn_pages.borrow_mut().push(page);
+            self.dyn_pages.borrow_mut().push(page.upcast());
             self.fans.borrow_mut().push(fu);
         }
         for (i, info) in nets.iter().enumerate() {
@@ -2709,7 +2727,7 @@ impl Ui {
             self.sidebar.insert(&row, pos);
             pos += 1;
             self.dyn_rows.borrow_mut().push(row);
-            self.dyn_pages.borrow_mut().push(page);
+            self.dyn_pages.borrow_mut().push(page.upcast());
             self.nets.borrow_mut().push(nu);
         }
         for (i, info) in drives.iter().enumerate() {
@@ -2723,7 +2741,7 @@ impl Ui {
             self.sidebar.insert(&row, pos);
             pos += 1;
             self.dyn_rows.borrow_mut().push(row);
-            self.dyn_pages.borrow_mut().push(page);
+            self.dyn_pages.borrow_mut().push(page.upcast());
             self.drives.borrow_mut().push(du);
         }
         for (i, info) in bats.iter().enumerate() {
@@ -2733,7 +2751,7 @@ impl Ui {
             self.sidebar.insert(&row, pos);
             pos += 1;
             self.dyn_rows.borrow_mut().push(row);
-            self.dyn_pages.borrow_mut().push(page);
+            self.dyn_pages.borrow_mut().push(page.upcast());
             self.bats.borrow_mut().push(bu);
         }
         // If the previously selected row was removed, fall back to the first tab.
