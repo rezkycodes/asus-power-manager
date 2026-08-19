@@ -238,6 +238,10 @@ struct Shared {
     m_hz: String,
     m_dpi: String,
     m_onboard: bool,
+    m_led_mode: String,
+    m_led_color: String,
+    m_led_period: String,
+    m_led_intensity: String,
     // ── Memory (kB, f64) ──
     mem_total: f64,
     mem_used: f64,
@@ -1979,6 +1983,10 @@ fn spawn_sampler(sh: Arc<Mutex<Shared>>) {
                     let m_hz = read_kv(&mconf, "HZ").unwrap_or_else(|| "1000".into());
                     let m_dpi = read_kv(&mconf, "DPI").unwrap_or_else(|| "1600".into());
                     let m_onboard = read_kv(&mconf, "ONBOARD").map(|v| v == "on").unwrap_or(false);
+                    let m_led_mode = read_kv(&mconf, "LED_MODE").unwrap_or_else(|| "1".into());
+                    let m_led_color = read_kv(&mconf, "LED_COLOR").unwrap_or_else(|| "0x00c8ff".into());
+                    let m_led_period = read_kv(&mconf, "LED_PERIOD").unwrap_or_else(|| "3000".into());
+                    let m_led_intensity = read_kv(&mconf, "LED_INTENSITY").unwrap_or_else(|| "100".into());
                     let m_bat = rd("/sys/class/power_supply/hidpp_battery_0/capacity")
                         .or_else(|| read_kv(&mconf, "BATTERY"))
                         .unwrap_or_else(|| "90".into());
@@ -2078,6 +2086,10 @@ fn spawn_sampler(sh: Arc<Mutex<Shared>>) {
                         g.m_hz = m_hz;
                         g.m_dpi = m_dpi;
                         g.m_onboard = m_onboard;
+                        g.m_led_mode = m_led_mode;
+                        g.m_led_color = m_led_color;
+                        g.m_led_period = m_led_period;
+                        g.m_led_intensity = m_led_intensity;
                         g.mem_total = mem_total;
                         g.mem_used = mem_used;
                         g.mem_avail = mem_avail;
@@ -2356,6 +2368,13 @@ struct Ui {
     m_sync: Rc<Cell<bool>>,
     m_pending_dpi: Rc<Cell<Option<(u32, Instant)>>>,
     m_pending_hz: Rc<Cell<Option<(u32, Instant)>>>,
+    row_m_led_prev: adw::ActionRow,
+    m_led_swatch: gtk::DrawingArea,
+    m_led_btns: Vec<(u32, gtk::Button)>,
+    row_m_led_bright: adw::ActionRow,
+    scale_m_led_bright: gtk::Scale,
+    row_m_led_speed: adw::ActionRow,
+    scale_m_led_speed: gtk::Scale,
     services: Vec<SvcW>,
     // memory
     row_mem: adw::ActionRow,
@@ -2566,6 +2585,29 @@ impl Ui {
         if self.switch_onboard.is_active() != g.m_onboard {
             self.m_sync.set(true);
             self.switch_onboard.set_active(g.m_onboard);
+            self.m_sync.set(false);
+        }
+
+        // Mouse LED
+        let m_mode: u32 = g.m_led_mode.parse().unwrap_or(1);
+        let (mr, mg, mb) = parse_hex_color(&g.m_led_color);
+        let m_int: u32 = g.m_led_intensity.parse().unwrap_or(100);
+        let m_per: u32 = g.m_led_period.parse().unwrap_or(3000);
+        let m_mode_label = mouse_led_mode_name(m_mode);
+        self.row_m_led_prev.set_subtitle(&format!(
+            "Mode: {} • Hex: #{:02X}{:02X}{:02X} • Brightness: {}% • Speed: {:.1}s",
+            m_mode_label, mr, mg, mb, m_int, m_per as f64 / 1000.0
+        ));
+        self.m_led_swatch.queue_draw();
+        for (v, b) in &self.m_led_btns {
+            Self::set_active(b, *v == m_mode);
+        }
+        if !self.m_sync.get() {
+            self.m_sync.set(true);
+            self.scale_m_led_bright.set_value(m_int as f64);
+            self.row_m_led_bright.set_subtitle(&format!("{}%", m_int));
+            self.scale_m_led_speed.set_value(m_per as f64 / 1000.0);
+            self.row_m_led_speed.set_subtitle(&format!("{:.1}s ({} ms)", m_per as f64 / 1000.0, m_per));
             self.m_sync.set(false);
         }
 
@@ -3301,6 +3343,49 @@ fn draw_circle(cr: &gtk::cairo::Context, w: f64, h: f64, r: u8, g: u8, b: u8) {
     cr.set_source_rgba(1.0, 1.0, 1.0, 0.45);
     cr.set_line_width(2.0);
     let _ = cr.stroke();
+}
+
+fn parse_hex_color(s: &str) -> (u8, u8, u8) {
+    let clean = s.trim_start_matches("0x").trim_start_matches('#');
+    if clean.len() >= 6 {
+        let r = u8::from_str_radix(&clean[0..2], 16).unwrap_or(0);
+        let g = u8::from_str_radix(&clean[2..4], 16).unwrap_or(200);
+        let b = u8::from_str_radix(&clean[4..6], 16).unwrap_or(255);
+        (r, g, b)
+    } else {
+        (0, 200, 255)
+    }
+}
+
+fn mouse_led_mode_name(id: u32) -> &'static str {
+    match id {
+        0 => "Disabled (Off)",
+        1 => "Static Color",
+        3 => "Color Cycle",
+        10 => "Breathing",
+        _ => "Static Color",
+    }
+}
+
+#[derive(Clone, Debug)]
+struct MouseLedState {
+    mode: u32,
+    r: u8,
+    g: u8,
+    b: u8,
+    period_ms: u32,
+    intensity: u32,
+}
+
+fn read_mouse_led_conf() -> MouseLedState {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
+    let p = format!("{home}/.config/asus-power-manager/logitech.conf");
+    let mode: u32 = read_kv(&p, "LED_MODE").and_then(|v| v.parse().ok()).unwrap_or(1);
+    let color_str = read_kv(&p, "LED_COLOR").unwrap_or_else(|| "0x00c8ff".into());
+    let (r, g, b) = parse_hex_color(&color_str);
+    let period_ms: u32 = read_kv(&p, "LED_PERIOD").and_then(|v| v.parse().ok()).unwrap_or(3000);
+    let intensity: u32 = read_kv(&p, "LED_INTENSITY").and_then(|v| v.parse().ok()).unwrap_or(100);
+    MouseLedState { mode, r, g, b, period_ms, intensity }
 }
 
 fn build_rgb_page() -> adw::PreferencesPage {
@@ -5871,6 +5956,258 @@ fn build_ui(app: &adw::Application) {
     g_ob.add(&row_usb);
     mouse_page.add(&g_ob);
 
+    // ── Mouse LED Control (Primary Zone - Solaar HID++ 4.2) ──
+    let m_led_st = Rc::new(RefCell::new(read_mouse_led_conf()));
+    let g_m_led = adw::PreferencesGroup::builder()
+        .title("LED Lighting (Primary Zone)")
+        .description("RGB indicator LED effects and colors via Logitech HID++ 4.2")
+        .build();
+
+    let row_m_led_prev = adw::ActionRow::builder().title("Active Mouse LED Status").build();
+    let m_led_swatch = gtk::DrawingArea::new();
+    m_led_swatch.set_content_width(52);
+    m_led_swatch.set_content_height(28);
+    m_led_swatch.set_valign(gtk::Align::Center);
+    {
+        let st = m_led_st.clone();
+        m_led_swatch.set_draw_func(move |_a, cr, w, h| {
+            let s = st.borrow();
+            if s.mode == 0 {
+                draw_swatch(cr, w as f64, h as f64, 30, 30, 30);
+            } else {
+                draw_swatch(cr, w as f64, h as f64, s.r, s.g, s.b);
+            }
+        });
+    }
+    row_m_led_prev.add_suffix(&m_led_swatch);
+    g_m_led.add(&row_m_led_prev);
+
+    // Apply helper for mouse LED
+    let apply_m_led: Rc<dyn Fn()> = {
+        let st = m_led_st.clone();
+        Rc::new(move || {
+            let s = st.borrow();
+            let hex_color = format!("0x{:02x}{:02x}{:02x}", s.r, s.g, s.b);
+            run_user(vec![
+                script_path("battery-mouse-logitech.sh"),
+                "led".into(),
+                s.mode.to_string(),
+                hex_color,
+                s.period_ms.to_string(),
+                s.intensity.to_string(),
+            ]);
+        })
+    };
+    let refresh_m_led_prev: Rc<dyn Fn()> = {
+        let st = m_led_st.clone();
+        let row = row_m_led_prev.clone();
+        let pv = m_led_swatch.clone();
+        Rc::new(move || {
+            let s = st.borrow();
+            row.set_subtitle(&format!(
+                "Mode: {} • Hex: #{:02X}{:02X}{:02X} • Brightness: {}% • Speed: {:.1}s",
+                mouse_led_mode_name(s.mode), s.r, s.g, s.b, s.intensity, s.period_ms as f64 / 1000.0
+            ));
+            pv.queue_draw();
+        })
+    };
+    let m_led_deb: Rc<Cell<Option<glib::SourceId>>> = Rc::new(Cell::new(None));
+    let schedule_m_led: Rc<dyn Fn()> = {
+        let apply = apply_m_led.clone();
+        let deb = m_led_deb.clone();
+        Rc::new(move || {
+            if let Some(id) = deb.take() {
+                id.remove();
+            }
+            let apply2 = apply.clone();
+            let deb2 = deb.clone();
+            let id = glib::timeout_add_local(Duration::from_millis(80), move || {
+                apply2();
+                deb2.set(None);
+                glib::ControlFlow::Break
+            });
+            deb.set(Some(id));
+        })
+    };
+
+    // LED Mode buttons
+    let row_m_led_mode = adw::ActionRow::builder()
+        .title("Lighting Effect")
+        .subtitle("Select pattern: Off, Static, Cycle, Breathe")
+        .build();
+    let box_m_led_mode = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    box_m_led_mode.set_valign(gtk::Align::Center);
+    let mut m_led_btns: Vec<(u32, gtk::Button)> = Vec::new();
+    let m_mode_choices = [
+        (0u32, "Off"),
+        (1u32, "Static"),
+        (3u32, "Cycle"),
+        (10u32, "Breathe"),
+    ];
+    for (mode_id, mode_lbl) in m_mode_choices {
+        let b = seg_button(mode_lbl);
+        let st = m_led_st.clone();
+        let apply = apply_m_led.clone();
+        let ref_prev = refresh_m_led_prev.clone();
+        b.connect_clicked(move |_| {
+            st.borrow_mut().mode = mode_id;
+            ref_prev();
+            apply();
+        });
+        box_m_led_mode.append(&b);
+        m_led_btns.push((mode_id, b));
+    }
+    row_m_led_mode.add_suffix(&box_m_led_mode);
+    g_m_led.add(&row_m_led_mode);
+
+    // Color Swatches Palette for Mouse LED
+    let card_m_swatches = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    card_m_swatches.set_halign(gtk::Align::Center);
+    card_m_swatches.set_valign(gtk::Align::Center);
+    card_m_swatches.set_margin_top(8);
+    card_m_swatches.set_margin_bottom(8);
+
+    let m_palette = [
+        ("Cyan", 0u8, 200u8, 255u8),
+        ("Blue", 0, 100, 255),
+        ("Purple", 160, 0, 255),
+        ("Magenta", 255, 0, 127),
+        ("Red", 255, 0, 0),
+        ("Orange", 255, 120, 0),
+        ("Yellow", 255, 216, 0),
+        ("Green", 0, 230, 118),
+        ("White", 255, 255, 255),
+    ];
+
+    for (cname, pr, pg, pb) in m_palette {
+        let btn = gtk::Button::new();
+        btn.add_css_class("flat");
+        btn.set_tooltip_text(Some(&format!("{cname} (#{pr:02X}{pg:02X}{pb:02X})")));
+        let circle = gtk::DrawingArea::new();
+        circle.set_content_width(30);
+        circle.set_content_height(30);
+        circle.set_draw_func(move |_a, cr, w, h| {
+            draw_circle(cr, w as f64, h as f64, pr, pg, pb);
+        });
+        btn.set_child(Some(&circle));
+        let st = m_led_st.clone();
+        let apply = apply_m_led.clone();
+        let ref_prev = refresh_m_led_prev.clone();
+        btn.connect_clicked(move |_| {
+            {
+                let mut s = st.borrow_mut();
+                s.r = pr;
+                s.g = pg;
+                s.b = pb;
+                if s.mode == 0 {
+                    s.mode = 1;
+                }
+            }
+            ref_prev();
+            apply();
+        });
+        card_m_swatches.append(&btn);
+    }
+    let row_m_palette = adw::PreferencesRow::new();
+    row_m_palette.set_child(Some(&card_m_swatches));
+    g_m_led.add(&row_m_palette);
+
+    // Color Dialog Button
+    let row_m_color = adw::ActionRow::builder()
+        .title("Custom Color (Spectrum Picker)")
+        .subtitle("Select custom 24-bit RGB color for mouse LED")
+        .build();
+    let m_color_dialog = gtk::ColorDialog::new();
+    m_color_dialog.set_with_alpha(false);
+    let m_color_btn = gtk::ColorDialogButton::new(Some(m_color_dialog));
+    m_color_btn.set_valign(gtk::Align::Center);
+    {
+        let s = m_led_st.borrow();
+        m_color_btn.set_rgba(&gtk::gdk::RGBA::new(s.r as f32 / 255.0, s.g as f32 / 255.0, s.b as f32 / 255.0, 1.0));
+    }
+    {
+        let st = m_led_st.clone();
+        let apply = apply_m_led.clone();
+        let ref_prev = refresh_m_led_prev.clone();
+        m_color_btn.connect_rgba_notify(move |btn| {
+            let rgba = btn.rgba();
+            {
+                let mut s = st.borrow_mut();
+                s.r = (rgba.red() * 255.0).round() as u8;
+                s.g = (rgba.green() * 255.0).round() as u8;
+                s.b = (rgba.blue() * 255.0).round() as u8;
+                if s.mode == 0 {
+                    s.mode = 1;
+                }
+            }
+            ref_prev();
+            apply();
+        });
+    }
+    row_m_color.add_suffix(&m_color_btn);
+    g_m_led.add(&row_m_color);
+
+    // Brightness / Intensity Slider
+    let row_m_led_bright = adw::ActionRow::builder().title("LED Brightness").subtitle("100%").build();
+    let scale_m_led_bright = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 100.0, 5.0);
+    scale_m_led_bright.set_size_request(180, -1);
+    scale_m_led_bright.set_valign(gtk::Align::Center);
+    {
+        let s = m_led_st.borrow();
+        scale_m_led_bright.set_value(s.intensity as f64);
+    }
+    {
+        let st = m_led_st.clone();
+        let sch = schedule_m_led.clone();
+        let ref_prev = refresh_m_led_prev.clone();
+        let row_b = row_m_led_bright.clone();
+        let sync_guard = m_sync.clone();
+        scale_m_led_bright.connect_value_changed(move |sc| {
+            if sync_guard.get() {
+                return;
+            }
+            let int_val = sc.value().round() as u32;
+            row_b.set_subtitle(&format!("{}%", int_val));
+            st.borrow_mut().intensity = int_val;
+            ref_prev();
+            sch();
+        });
+    }
+    row_m_led_bright.add_suffix(&scale_m_led_bright);
+    g_m_led.add(&row_m_led_bright);
+
+    // Animation Speed / Period Slider (for Cycle and Breathe)
+    let row_m_led_speed = adw::ActionRow::builder().title("Animation Speed (Period)").subtitle("3.0s (3000 ms)").build();
+    let scale_m_led_speed = gtk::Scale::with_range(gtk::Orientation::Horizontal, 1.0, 10.0, 0.5);
+    scale_m_led_speed.set_size_request(180, -1);
+    scale_m_led_speed.set_valign(gtk::Align::Center);
+    {
+        let s = m_led_st.borrow();
+        scale_m_led_speed.set_value(s.period_ms as f64 / 1000.0);
+    }
+    {
+        let st = m_led_st.clone();
+        let sch = schedule_m_led.clone();
+        let ref_prev = refresh_m_led_prev.clone();
+        let row_s = row_m_led_speed.clone();
+        let sync_guard = m_sync.clone();
+        scale_m_led_speed.connect_value_changed(move |sc| {
+            if sync_guard.get() {
+                return;
+            }
+            let sec_val = sc.value();
+            let ms_val = (sec_val * 1000.0).round() as u32;
+            row_s.set_subtitle(&format!("{:.1}s ({} ms)", sec_val, ms_val));
+            st.borrow_mut().period_ms = ms_val;
+            ref_prev();
+            sch();
+        });
+    }
+    row_m_led_speed.add_suffix(&scale_m_led_speed);
+    g_m_led.add(&row_m_led_speed);
+
+    mouse_page.add(&g_m_led);
+
     let mp = stack.add_titled(&mouse_page, Some("mouse"), "Mouse Logitech");
     mp.set_icon_name(Some("input-mouse-symbolic"));
 
@@ -6117,6 +6454,13 @@ fn build_ui(app: &adw::Application) {
         m_sync,
         m_pending_dpi,
         m_pending_hz,
+        row_m_led_prev,
+        m_led_swatch,
+        m_led_btns,
+        row_m_led_bright,
+        scale_m_led_bright,
+        row_m_led_speed,
+        scale_m_led_speed,
         services: svc_widgets,
         row_mem,
         mem_bar,

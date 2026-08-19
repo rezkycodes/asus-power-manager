@@ -73,6 +73,10 @@ case "$ACTION" in
             echo "HZ=$HZ"
             echo "DPI=$DPI"
             echo "ONBOARD=$OB"
+            echo "LED_MODE=$(get_cached "LED_MODE" "1")"
+            echo "LED_COLOR=$(get_cached "LED_COLOR" "0x00c8ff")"
+            echo "LED_PERIOD=$(get_cached "LED_PERIOD" "3000")"
+            echo "LED_INTENSITY=$(get_cached "LED_INTENSITY" "100")"
         else
             # Fallback to cache if mouse is offline/sleeping
             echo "STATUS=Offline"
@@ -80,6 +84,10 @@ case "$ACTION" in
             echo "HZ=$(get_cached "HZ" "1000")"
             echo "DPI=$(get_cached "DPI" "1600")"
             echo "ONBOARD=$(get_cached "ONBOARD" "off")"
+            echo "LED_MODE=$(get_cached "LED_MODE" "1")"
+            echo "LED_COLOR=$(get_cached "LED_COLOR" "0x00c8ff")"
+            echo "LED_PERIOD=$(get_cached "LED_PERIOD" "3000")"
+            echo "LED_INTENSITY=$(get_cached "LED_INTENSITY" "100")"
         fi
         ;;
 
@@ -135,8 +143,57 @@ case "$ACTION" in
         echo "ONBOARD=$OB_CACHE"
         ;;
 
+    led|led-effect)
+        MODE="${2:-1}"             # 0=Disabled, 1=Static, 3=Cycle, 10=Breathe
+        RAW_COLOR="${3:-0x00c8ff}"  # e.g. 0x00c8ff, #00c8ff, or 00c8ff
+        PERIOD="${4:-3000}"         # in ms
+        INTENSITY="${5:-100}"       # 0-100
+
+        # Normalize hex color to 0xRRGGBB
+        HEX_CLEAN="${RAW_COLOR#\#}"
+        HEX_CLEAN="${HEX_CLEAN#0x}"
+        if [[ ${#HEX_CLEAN} -eq 6 ]]; then
+            COLOR="0x$HEX_CLEAN"
+        else
+            COLOR="0x00c8ff"
+        fi
+
+        # Make sure led_control is enabled in solaar
+        solaar config "$M_NAME" led_control on >/dev/null 2>&1 || true
+
+        # Build YAML setting string for Solaar
+        YAML_SET=""
+        if [[ "$MODE" == "0" || "$MODE" == "off" || "$MODE" == "disabled" ]]; then
+            YAML_SET="!LEDEffectSetting {ID: 0}"
+            MODE="0"
+        elif [[ "$MODE" == "3" || "$MODE" == "cycle" ]]; then
+            YAML_SET="!LEDEffectSetting {ID: 3, period: $PERIOD, intensity: $INTENSITY}"
+            MODE="3"
+        elif [[ "$MODE" == "10" || "$MODE" == "breathe" || "$MODE" == "pulse" ]]; then
+            YAML_SET="!LEDEffectSetting {ID: 10, color: $COLOR, period: $PERIOD, intensity: $INTENSITY}"
+            MODE="10"
+        else
+            # Default to static (ID: 1)
+            YAML_SET="!LEDEffectSetting {ID: 1, color: $COLOR, intensity: $INTENSITY}"
+            MODE="1"
+        fi
+
+        solaar config "$M_NAME" led_zone_1 "$YAML_SET" >/dev/null 2>&1 || true
+
+        # Update cache
+        set_cached "LED_MODE" "$MODE"
+        set_cached "LED_COLOR" "$COLOR"
+        set_cached "LED_PERIOD" "$PERIOD"
+        set_cached "LED_INTENSITY" "$INTENSITY"
+
+        echo "LED_MODE=$MODE"
+        echo "LED_COLOR=$COLOR"
+        echo "LED_PERIOD=$PERIOD"
+        echo "LED_INTENSITY=$INTENSITY"
+        ;;
+
     *)
-        echo "Usage: $0 [status | hz 1000|500|250|125 | dpi 400|800|1600|3200 | onboard on|off]"
+        echo "Usage: $0 [status | hz 1000|500|250|125 | dpi 400|800|1600|3200 | onboard on|off | led MODE [COLOR] [PERIOD] [INTENSITY]]"
         exit 1
         ;;
 esac
