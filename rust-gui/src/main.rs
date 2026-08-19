@@ -247,6 +247,10 @@ struct Shared {
     svc_all: Vec<SvcUnit>,
     // ── Systemd services (key "user:unit"/"sys:unit" -> state) ──
     services: std::collections::HashMap<String, String>,
+    // ── Adaptive sampling (pause heavy work for hidden tabs) ──
+    visible_tab: String,
+    pause_hidden: bool,
+    force_heavy: bool,
 }
 
 // ───────────────────────── helpers ─────────────────────────
@@ -1907,6 +1911,23 @@ fn spawn_sampler(sh: Arc<Mutex<Shared>>) {
             sample_fans(&sh);
             sample_nets(&sh);
             sample_bats(&sh);
+
+            // Read adaptive-sampling gate once per tick; clear the force flag.
+            let (pause_hidden, visible_tab, force) = match sh.lock() {
+                Ok(mut g) => {
+                    let f = g.force_heavy;
+                    if f {
+                        g.force_heavy = false;
+                    }
+                    (g.pause_hidden, g.visible_tab.clone(), f)
+                }
+                Err(_) => (true, String::new(), false),
+            };
+            // The two heaviest collections (process table + full unit list) only
+            // sample when their tab is visible (or when pausing is disabled).
+            let want_procs = !pause_hidden || visible_tab == "apps";
+            let want_svc_all = !pause_hidden || visible_tab == "svcall";
+
             if tick % 3 == 0 {
                 refresh_drive_list(&sh);
                 refresh_gpu_list(&sh);
@@ -1915,17 +1936,35 @@ fn spawn_sampler(sh: Arc<Mutex<Shared>>) {
                 refresh_bat_list(&sh);
                 refresh_net_extra(&sh);
                 refresh_part_usage(&sh);
+            }
+            if want_procs && (tick % 3 == 0 || force) {
                 let (pv, pc) = sample_procs(&mut proc_prev, &mut proc_total_prev, &mut io_prev);
                 if let Ok(mut g) = sh.lock() {
                     g.procs = pv;
                     g.proc_total = pc;
                 }
+            } else if !want_procs {
+                // Free the process table's memory while its tab is hidden.
+                if let Ok(mut g) = sh.lock() {
+                    if !g.procs.is_empty() {
+                        g.procs = Vec::new();
+                    }
+                }
+                proc_prev.clear();
+                io_prev.clear();
             }
-            if tick % 6 == 1 {
+            if want_svc_all && (tick % 6 == 1 || force) {
                 let mut all = list_services(false);
                 all.extend(list_services(true));
                 if let Ok(mut g) = sh.lock() {
                     g.svc_all = all;
+                }
+            } else if !want_svc_all {
+                // Free the full unit list while its tab is hidden.
+                if let Ok(mut g) = sh.lock() {
+                    if !g.svc_all.is_empty() {
+                        g.svc_all = Vec::new();
+                    }
                 }
             }
             tick += 1;
@@ -4500,6 +4539,8 @@ fn build_ui(app: &adw::Application) {
         temp_hist: VecDeque::from(vec![0.0; HISTORY]),
         mem_hist: VecDeque::from(vec![0.0; HISTORY]),
         swap_hist: VecDeque::from(vec![0.0; HISTORY]),
+        visible_tab: "cpu".into(),
+        pause_hidden: true,
         ..Default::default()
     }));
     gather_drives_static(&shared);
@@ -4841,6 +4882,27 @@ fn build_ui(app: &adw::Application) {
     let content_header = adw::HeaderBar::new();
     let content_title = adw::WindowTitle::new("CPU", "");
     content_header.set_title_widget(Some(&content_title));
+
+    // Option: pause heavy sampling (process table / full unit list) for tabs that
+    // are not currently visible. On by default to keep the footprint small.
+    let pause_toggle = gtk::ToggleButton::new();
+    pause_toggle.set_icon_name("media-playback-pause-symbolic");
+    pause_toggle.set_active(true);
+    pause_toggle.set_tooltip_text(Some("Pause sampling for hidden tabs (saves memory & CPU)"));
+    content_header.pack_end(&pause_toggle);
+    {
+        let sh = shared.clone();
+        pause_toggle.connect_toggled(move |b| {
+            if let Ok(mut g) = sh.lock() {
+                g.pause_hidden = b.is_active();
+                if !b.is_active() {
+                    // Resuming: refill hidden tabs on the next tick.
+                    g.force_heavy = true;
+                }
+            }
+        });
+    }
+
     content_tv.add_top_bar(&content_header);
     content_tv.set_content(Some(&stack));
 
@@ -4855,6 +4917,7 @@ fn build_ui(app: &adw::Application) {
     {
         let stack = stack.clone();
         let content_title = content_title.clone();
+        let sh = shared.clone();
         sidebar.connect_row_selected(move |_lb, row| {
             if let Some(r) = row {
                 let name = r.widget_name();
@@ -4862,6 +4925,11 @@ fn build_ui(app: &adw::Application) {
                 if let Some(child) = stack.child_by_name(name.as_str()) {
                     let title = stack.page(&child).title().unwrap_or_default();
                     content_title.set_title(title.as_str());
+                }
+                // Tell the sampler which tab is live and sample it right away.
+                if let Ok(mut g) = sh.lock() {
+                    g.visible_tab = name.as_str().to_string();
+                    g.force_heavy = true;
                 }
             }
         });
@@ -4888,7 +4956,9 @@ fn build_ui(app: &adw::Application) {
     // CSS
     let provider = gtk::CssProvider::new();
     provider.load_from_data(
-        "window, .background, headerbar, .view, viewswitcher, stackswitcher, \
+        "@define-color accent_bg_color #e0e0e0; @define-color accent_fg_color #000000; \
+         @define-color accent_color #ffffff; \
+         window, .background, headerbar, .view, viewswitcher, stackswitcher, \
          scrolledwindow, textview, textview text, preferencespage, clamp, viewport { \
          background-color: #000000; } \
          headerbar { box-shadow: none; border-bottom: 1px solid rgba(255,255,255,0.06); } \
@@ -4901,7 +4971,11 @@ fn build_ui(app: &adw::Application) {
          .navigation-sidebar > row:selected { background-color: #1c1c1c; color: #ffffff; } \
          .boxed-list, .card { background-color: #0a0a0a; border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; } \
          .boxed-list > row, .card > row { background-color: transparent; } \
-         .linked > togglebutton:checked { background-color: #1c1c1c; color: #ffffff; } \
+         .linked > togglebutton:checked { background-color: #2a2a2a; color: #ffffff; } \
+         button.suggested-action { background-color: #e6e6e6; color: #000000; box-shadow: none; } \
+         button.suggested-action:hover { background-color: #f2f2f2; color: #000000; } \
+         button.destructive-action { background-color: #333333; color: #ffffff; box-shadow: none; } \
+         button.destructive-action:hover { background-color: #444444; color: #ffffff; } \
          .cpu-graph-frame { border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; \
          background-color: #0a0a0a; } \
          scale.red-slider highlight { background: #ff3b30; } \
