@@ -4828,7 +4828,6 @@ fn build_ui(app: &adw::Application) {
     side_header.set_title_widget(Some(&adw::WindowTitle::new("Tweaks ASUS TUF", "ASUS TUF Gaming")));
     side_tv.add_top_bar(&side_header);
     side_tv.set_content(Some(&side_scroll));
-    let sidebar_page = adw::NavigationPage::new(&side_tv, "Menu");
 
     // Content pane — header title tracks the selected page.
     stack.set_hexpand(true);
@@ -4840,13 +4839,26 @@ fn build_ui(app: &adw::Application) {
     content_header.set_title_widget(Some(&content_title));
     content_tv.add_top_bar(&content_header);
     content_tv.set_content(Some(&stack));
-    let content_page = adw::NavigationPage::new(&content_tv, "Detail");
 
-    let split = adw::NavigationSplitView::new();
-    split.set_sidebar(Some(&sidebar_page));
-    split.set_content(Some(&content_page));
+    // Collapsible sidebar: AdwOverlaySplitView exposes show-sidebar, so a header
+    // toggle can hide the sidebar and let content expand (VS Code style), and it
+    // overlays instead of sitting side-by-side once collapsed on narrow windows.
+    let split = adw::OverlaySplitView::new();
+    split.set_sidebar(Some(&side_tv));
+    split.set_content(Some(&content_tv));
     split.set_min_sidebar_width(210.0);
     split.set_max_sidebar_width(260.0);
+
+    // Collapse toggle in the content header, kept in sync with show-sidebar.
+    let btn_toggle = gtk::ToggleButton::new();
+    btn_toggle.set_icon_name("sidebar-show-symbolic");
+    btn_toggle.set_tooltip_text(Some("Tampilkan / sembunyikan sidebar"));
+    content_header.pack_start(&btn_toggle);
+    split
+        .bind_property("show-sidebar", &btn_toggle, "active")
+        .sync_create()
+        .bidirectional()
+        .build();
 
     {
         let stack = stack.clone();
@@ -4860,8 +4872,10 @@ fn build_ui(app: &adw::Application) {
                     let title = stack.page(&child).title().unwrap_or_default();
                     content_title.set_title(title.as_str());
                 }
-                // On narrow windows this reveals the content pane after a tap.
-                split.set_show_content(true);
+                // On narrow windows the sidebar overlays — close it after a pick.
+                if split.is_collapsed() {
+                    split.set_show_sidebar(false);
+                }
             }
         });
     }
@@ -4871,7 +4885,7 @@ fn build_ui(app: &adw::Application) {
 
     window.set_content(Some(&split));
 
-    // Adaptive: collapse to a single pane on narrow windows (phone/split-screen).
+    // Adaptive: overlay the sidebar (instead of side-by-side) on narrow windows.
     if let Ok(cond) = adw::BreakpointCondition::parse("max-width: 640px") {
         let bp = adw::Breakpoint::new(cond);
         bp.add_setter(&split, "collapsed", Some(&true.to_value()));
