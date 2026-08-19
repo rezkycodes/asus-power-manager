@@ -249,6 +249,7 @@ struct Shared {
     nets: Vec<NetInfo>,
     // ── Tailscale tailnet devices (name + IP) ──
     ts_peers: Vec<TsPeer>,
+    ts_running: bool,
     // ── Batteries (system + peripherals) ──
     bats: Vec<BatInfo>,
     // ── Processes (task manager) ──
@@ -1618,9 +1619,10 @@ fn refresh_net_extra(sh: &Arc<Mutex<Shared>>) {
 
     // Tailnet device list — only query when a tailscale interface is present.
     let has_ts = list.iter().any(|(iface, _)| iface.starts_with("tailscale"));
-    let peers = if has_ts { query_tailscale_peers() } else { Vec::new() };
+    let (running, peers) = if has_ts { query_tailscale_peers() } else { (false, Vec::new()) };
     if let Ok(mut s) = sh.lock() {
         s.ts_peers = peers;
+        s.ts_running = running;
     }
 }
 
@@ -1630,12 +1632,15 @@ fn refresh_net_extra(sh: &Arc<Mutex<Shared>>) {
 //   <ip> <name> <user@> <os> <status...>
 // The first data row is this machine (self); "offline" anywhere in the status
 // tail marks a peer as offline.
-fn query_tailscale_peers() -> Vec<TsPeer> {
+fn query_tailscale_peers() -> (bool, Vec<TsPeer>) {
     let out = match Command::new("tailscale").arg("status").output() {
         Ok(o) => o,
-        Err(_) => return Vec::new(),
+        Err(_) => return (false, Vec::new()),
     };
     let text = String::from_utf8_lossy(&out.stdout);
+    // When the backend is stopped, `tailscale status` prints "Tailscale is
+    // stopped." (and exits non-zero). Treat any self line / success as running.
+    let running = out.status.success() && !text.contains("Tailscale is stopped");
     let mut peers: Vec<TsPeer> = Vec::new();
     for (i, line) in text.lines().enumerate() {
         let t = line.trim();
@@ -1667,7 +1672,7 @@ fn query_tailscale_peers() -> Vec<TsPeer> {
             .then(b.is_self.cmp(&a.is_self))
             .then(a.name.cmp(&b.name))
     });
-    peers
+    (running, peers)
 }
 
 // Enumerate fans from hwmon fanN_input (with fanN_label when present).
@@ -2695,6 +2700,13 @@ impl Ui {
             }
             // Tailnet device list — rebuild rows only when the peer set changes.
             if let Some(grp) = &nu.ts_group {
+                // Reflect backend state on the Connect/Disconnect buttons.
+                if let Some(b) = &nu.ts_connect {
+                    b.set_sensitive(!g.ts_running);
+                }
+                if let Some(b) = &nu.ts_disconnect {
+                    b.set_sensitive(g.ts_running);
+                }
                 let mut sig = String::new();
                 for p in g.ts_peers.iter() {
                     sig.push_str(&p.name);
@@ -4207,6 +4219,8 @@ struct NetUi {
     scale_lbl: gtk::Label,
     lbl: std::collections::HashMap<&'static str, gtk::Label>,
     ts_group: Option<adw::PreferencesGroup>,
+    ts_connect: Option<gtk::Button>,
+    ts_disconnect: Option<gtk::Button>,
     ts_rows: RefCell<Vec<adw::ActionRow>>,
     ts_sig: RefCell<String>,
 }
@@ -4310,16 +4324,28 @@ fn build_net_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &NetInfo) -> (a
     det("IPv6 Address", &g_det, &mut lbl, "ipv6");
     page.add(&g_det);
 
-    // For the Tailscale interface, add a live tailnet device list (name + IP).
-    let ts_group = if info.iface.starts_with("tailscale") {
+    // For the Tailscale interface, add a live tailnet device list (name + IP)
+    // plus Connect / Disconnect controls (operator user → no sudo needed).
+    let (ts_group, ts_connect, ts_disconnect) = if info.iface.starts_with("tailscale") {
         let g = adw::PreferencesGroup::builder()
             .title("Tailnet Devices")
             .description("Devices connected to your Tailscale network")
             .build();
+
+        let ctrl = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let b_conn = gtk::Button::builder().label("Connect").valign(gtk::Align::Center).build();
+        b_conn.add_css_class("suggested-action");
+        b_conn.connect_clicked(|_| run_user(vec!["tailscale".into(), "up".into()]));
+        let b_disc = gtk::Button::builder().label("Disconnect").valign(gtk::Align::Center).build();
+        b_disc.connect_clicked(|_| run_user(vec!["tailscale".into(), "down".into()]));
+        ctrl.append(&b_conn);
+        ctrl.append(&b_disc);
+        g.set_header_suffix(Some(&ctrl));
+
         page.add(&g);
-        Some(g)
+        (Some(g), Some(b_conn), Some(b_disc))
     } else {
-        None
+        (None, None, None)
     };
 
     let nu = NetUi {
@@ -4328,6 +4354,8 @@ fn build_net_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &NetInfo) -> (a
         scale_lbl,
         lbl,
         ts_group,
+        ts_connect,
+        ts_disconnect,
         ts_rows: RefCell::new(Vec::new()),
         ts_sig: RefCell::new(String::new()),
     };
