@@ -55,14 +55,14 @@ def apply_custom_css():
     button.icon-btn image,
     headerbar button image,
     levelbar block {
-        color: #ffffff !important;
+        color: #ffffff;
         -gtk-icon-palette: success #ffffff, warning #ffffff, error #ffffff;
     }
 
     .action-row-icon,
     AdwActionRow > image:first-child,
     AdwSwitchRow > image:first-child {
-        color: #ffffff !important;
+        color: #ffffff;
     }
 
     /* Modern Rounded-Rectangle Buttons (8px radius) */
@@ -70,8 +70,8 @@ def apply_custom_css():
     button.pill,
     .pill,
     .rounded-btn {
-        border-radius: 8px !important;
-        padding: 5px 14px !important;
+        border-radius: 8px;
+        padding: 5px 14px;
         font-weight: 600;
         transition: all 120ms ease-in-out;
     }
@@ -88,7 +88,7 @@ def apply_custom_css():
     /* Swatch Button Styling */
     .color-swatch-wrapper {
         padding: 3px;
-        border-radius: 8px !important;
+        border-radius: 8px;
         min-width: 40px;
         min-height: 40px;
         margin: 2px;
@@ -197,7 +197,7 @@ class ServiceDetailWindow(Adw.Window):
         group_info.add(self.row_status)
 
         self.row_resource = Adw.ActionRow()
-        self.row_resource.set_title("Resource & PID")
+        self.row_resource.set_title("Resource &amp; PID")
         self.row_resource.set_subtitle("Memuat...")
         self.row_resource.set_icon_name("lucide-cpu")
         group_info.add(self.row_resource)
@@ -457,7 +457,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         stack_power.set_icon_name("lucide-battery-charging")
 
         group_battery = Adw.PreferencesGroup()
-        group_battery.set_title("Status Baterai & Daya")
+        group_battery.set_title("Status Baterai &amp; Daya")
         self.page_power.add(group_battery)
 
         self.row_bat = Adw.ActionRow()
@@ -475,7 +475,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         group_battery.add(self.row_bat)
 
         self.row_drain = Adw.ActionRow()
-        self.row_drain.set_title("Sumber Daya & Watt")
+        self.row_drain.set_title("Sumber Daya &amp; Watt")
         self.row_drain.set_subtitle("Memuat...")
         self.row_drain.set_icon_name("lucide-zap")
         group_battery.add(self.row_drain)
@@ -488,7 +488,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
 
         # Group 2: Mode Manajemen GPU
         group_gpu = Adw.PreferencesGroup()
-        group_gpu.set_title("Manajemen & Mode GPU (Hybrid / AMD / NVIDIA)")
+        group_gpu.set_title("Manajemen &amp; Mode GPU (Hybrid / AMD / NVIDIA)")
         group_gpu.set_description("Atur peran grafis antara AMD Vega iGPU dan NVIDIA GTX 1660 Ti dGPU")
         self.page_power.add(group_gpu)
 
@@ -529,7 +529,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
 
         # Group 3: Mode Performa CPU
         group_modes = Adw.PreferencesGroup()
-        group_modes.set_title("Kontrol Mode Performa & Daya")
+        group_modes.set_title("Kontrol Mode Performa &amp; Daya")
         group_modes.set_description("Pilih profil performa prosesor (Biru = Aktif, Abu-abu = Pilihan)")
         self.page_power.add(group_modes)
 
@@ -574,7 +574,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
 
         # Group 4: Kontrol Kipas
         group_fan = Adw.PreferencesGroup()
-        group_fan.set_title("Kontrol Kipas & Pendingin (Dual Fan)")
+        group_fan.set_title("Kontrol Kipas &amp; Pendingin (Dual Fan)")
         self.page_power.add(group_fan)
 
         self.row_fan_rpm = Adw.ActionRow()
@@ -608,7 +608,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
 
         # Group 5: Fitur Hardware & Server
         group_hw = Adw.PreferencesGroup()
-        group_hw.set_title("Fitur Hardware & Server")
+        group_hw.set_title("Fitur Hardware &amp; Server")
         self.page_power.add(group_hw)
 
         self.switch_threshold = Adw.SwitchRow()
@@ -620,7 +620,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
 
         row_clamshell = Adw.ActionRow()
         row_clamshell.set_title("Mode Tutup Layar (Clamshell Server)")
-        row_clamshell.set_subtitle("Layar mati saat ditutup, CPU & agent tetap jalan 100%")
+        row_clamshell.set_subtitle("Layar mati saat ditutup, CPU &amp; agent tetap jalan 100%")
         row_clamshell.set_icon_name("lucide-laptop")
         lbl_cs = Gtk.Label(label="Aktif")
         lbl_cs.add_css_class("success")
@@ -644,7 +644,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
 
         # Group 1: Live Color Preview
         group_rgb_hero = Adw.PreferencesGroup()
-        group_rgb_hero.set_title("Status Warna & Efek Aktif")
+        group_rgb_hero.set_title("Status Warna &amp; Efek Aktif")
         self.page_rgb.add(group_rgb_hero)
 
         self.row_rgb_preview = Adw.ActionRow()
@@ -803,7 +803,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
 
         # Group 5: Kecerahan & Kecepatan
         group_rgb_settings = Adw.PreferencesGroup()
-        group_rgb_settings.set_title("Kecerahan & Kecepatan Efek")
+        group_rgb_settings.set_title("Kecerahan &amp; Kecepatan Efek")
         self.page_rgb.add(group_rgb_settings)
 
         self.row_rgb_bright = Adw.ActionRow()
@@ -850,14 +850,14 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
         stack_services.set_icon_name("lucide-server")
 
         group_user_srv = Adw.PreferencesGroup()
-        group_user_srv.set_title("Layanan AI & Pengguna (User Daemons)")
+        group_user_srv.set_title("Layanan AI &amp; Pengguna (User Daemons)")
         group_user_srv.set_description("Klik baris untuk melihat script .service lengkap, resource, dan log realtime")
         self.page_services.add(group_user_srv)
 
         self.user_services = [
             ("9router.service", "9router AI Proxy Gateway", "Port: 20128 (Local AI Gateway)", "lucide-network"),
             ("agentmemory.service", "AgentMemory Daemon Server", "Port: 3111 (AI Memory Bridge)", "lucide-database"),
-            ("hermes-gateway.service", "Hermes Agent Gateway", "Bot Telegram & Messaging Integration", "lucide-bot"),
+            ("hermes-gateway.service", "Hermes Agent Gateway", "Bot Telegram &amp; Messaging Integration", "lucide-bot"),
             ("hermes-webui.service", "Hermes Web UI Interface", "Port: 8787 (Browser Dashboard)", "lucide-globe"),
             ("code-server.service", "VS Code Remote Server", "Port: 8080 (Web IDE Browser)", "lucide-terminal"),
             ("ts-forward-watch.service", "Tailscale Port Forwarder", "Auto Forward Localhost Ports", "lucide-radio")
@@ -914,7 +914,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
             ("ollama.service", "Ollama Local LLM Engine", "Port: 11434 (Hardware Local Model Runner)", "lucide-bot"),
             ("tailscaled.service", "Tailscale Mesh VPN Daemon", "Jaringan VPN Remote Tanpa Port-Forwarding", "lucide-shield"),
             ("sshd.service", "OpenSSH Server Daemon", "Port: 22 (Akses Terminal Jarak Jauh)", "lucide-terminal"),
-            ("docker.service", "Docker Container Engine", "Runtime Kontainer & Layanan Virtual", "lucide-box"),
+            ("docker.service", "Docker Container Engine", "Runtime Kontainer &amp; Layanan Virtual", "lucide-box"),
             ("battery-charge-threshold.service", "Batas Baterai 80% Service", "Proteksi Hardware Pengisian Otomatis", "lucide-shield-check")
         ]
 
@@ -1044,7 +1044,7 @@ class BatteryManagerWindow(Adw.ApplicationWindow):
 
         # ── Group 4: Onboard Memory & Proteksi USB ───────────────
         group_m_memory = Adw.PreferencesGroup()
-        group_m_memory.set_title("Profil Onboard Memory & Anti-Lag USB")
+        group_m_memory.set_title("Profil Onboard Memory &amp; Anti-Lag USB")
         self.page_mouse.add(group_m_memory)
 
         self.switch_onboard = Adw.SwitchRow()
