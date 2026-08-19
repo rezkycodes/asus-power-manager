@@ -14,6 +14,7 @@ use std::process::Command;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use std::time::Instant;
 
 const HISTORY: usize = 60;
 
@@ -62,6 +63,12 @@ struct Shared {
     fan_policy: String,
     // ── CPU power mode ─────────────────────
     power_mode: String,
+    // ── Mouse Logitech ─────────────────────
+    m_bat: String,
+    m_status: String,
+    m_hz: String,
+    m_dpi: String,
+    m_onboard: bool,
 }
 
 // ───────────────────────── helpers ─────────────────────────
@@ -385,6 +392,18 @@ fn spawn_sampler(sh: Arc<Mutex<Shared>>) {
                             }
                         });
 
+                    // Mouse (fast: sysfs battery + cache conf, no solaar in loop)
+                    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
+                    let mconf = format!("{home}/.config/asus-power-manager/logitech.conf");
+                    let m_hz = read_kv(&mconf, "HZ").unwrap_or_else(|| "1000".into());
+                    let m_dpi = read_kv(&mconf, "DPI").unwrap_or_else(|| "1600".into());
+                    let m_onboard = read_kv(&mconf, "ONBOARD").map(|v| v == "on").unwrap_or(false);
+                    let m_bat = rd("/sys/class/power_supply/hidpp_battery_0/capacity")
+                        .or_else(|| read_kv(&mconf, "BATTERY"))
+                        .unwrap_or_else(|| "90".into());
+                    let m_status = rd("/sys/class/power_supply/hidpp_battery_0/status")
+                        .unwrap_or_else(|| "Unknown".into());
+
                     // heavy subprocess data every 3s
                     let counts = if tick % 3 == 0 { Some(count_procs_threads()) } else { None };
                     let up = if tick % 3 == 0 { Some(upower_battery()) } else { None };
@@ -439,6 +458,11 @@ fn spawn_sampler(sh: Arc<Mutex<Shared>>) {
                         g.fan_policy = fan_policy;
                         g.gpu_mode = gpu_mode;
                         g.power_mode = power_mode;
+                        g.m_bat = m_bat;
+                        g.m_status = m_status;
+                        g.m_hz = m_hz;
+                        g.m_dpi = m_dpi;
+                        g.m_onboard = m_onboard;
                         if let Some((p, t)) = counts {
                             g.processes = p;
                             g.threads = t;
@@ -481,6 +505,18 @@ fn run_priv(args: Vec<String>) {
         let _ = Command::new("sudo")
             .arg("-n")
             .args(&args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    });
+}
+fn run_user(args: Vec<String>) {
+    std::thread::spawn(move || {
+        if args.is_empty() {
+            return;
+        }
+        let _ = Command::new(&args[0])
+            .args(&args[1..])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();
@@ -559,6 +595,17 @@ struct Ui {
     switch_threshold: adw::SwitchRow,
     row_cpu_mon: adw::ActionRow,
     sync: Rc<Cell<bool>>,
+    // mouse
+    row_m_bat: adw::ActionRow,
+    m_bat_bar: gtk::LevelBar,
+    row_m_hz: adw::ActionRow,
+    hz_btns: Vec<(u32, gtk::Button)>,
+    row_m_dpi: adw::ActionRow,
+    scale_dpi: gtk::Scale,
+    switch_onboard: adw::SwitchRow,
+    m_sync: Rc<Cell<bool>>,
+    m_pending_dpi: Rc<Cell<Option<(u32, Instant)>>>,
+    m_pending_hz: Rc<Cell<Option<(u32, Instant)>>>,
 }
 
 impl Ui {
@@ -690,6 +737,65 @@ impl Ui {
             g.boost,
             g.profile
         ));
+
+        // ── Mouse ──
+        let mbat: f64 = g.m_bat.parse().unwrap_or(90.0);
+        self.m_bat_bar.set_value(mbat);
+        self.row_m_bat.set_title(&format!("Baterai Mouse G304: {}%", g.m_bat));
+        let mstat = if g.m_status.eq_ignore_ascii_case("discharging")
+            || g.m_status.eq_ignore_ascii_case("charging")
+            || g.m_status.eq_ignore_ascii_case("full")
+        {
+            "Tersambung (Aktif)"
+        } else {
+            "Standby / Tidur"
+        };
+        self.row_m_bat.set_subtitle(&format!("Status: {} • Koneksi: Lightspeed Receiver", mstat));
+
+        // Hz (honor pending user choice)
+        let mut hz: u32 = g.m_hz.parse().unwrap_or(1000);
+        if let Some((p, ts)) = self.m_pending_hz.get() {
+            if hz == p {
+                self.m_pending_hz.set(None);
+            } else if ts.elapsed().as_secs() < 6 {
+                hz = p;
+            } else {
+                self.m_pending_hz.set(None);
+            }
+        }
+        self.row_m_hz.set_subtitle(&format!(
+            "Aktif: {} Hz ({})",
+            hz,
+            if hz == 1000 { "1ms Peak" } else { "Hemat Baterai" }
+        ));
+        for (v, b) in &self.hz_btns {
+            Self::set_active(b, *v == hz);
+        }
+
+        // DPI (honor pending; skip while user dragging via m_sync)
+        let mut dpi: u32 = g.m_dpi.parse().unwrap_or(1600);
+        if let Some((p, ts)) = self.m_pending_dpi.get() {
+            if dpi == p {
+                self.m_pending_dpi.set(None);
+            } else if ts.elapsed().as_secs() < 6 {
+                dpi = p;
+            } else {
+                self.m_pending_dpi.set(None);
+            }
+        }
+        self.row_m_dpi.set_subtitle(&format!("{} DPI", dpi));
+        if !self.m_sync.get() && (self.scale_dpi.value() as u32) != dpi {
+            self.m_sync.set(true);
+            self.scale_dpi.set_value(dpi as f64);
+            self.m_sync.set(false);
+        }
+
+        // Onboard switch (guarded)
+        if self.switch_onboard.is_active() != g.m_onboard {
+            self.m_sync.set(true);
+            self.switch_onboard.set_active(g.m_onboard);
+            self.m_sync.set(false);
+        }
     }
 }
 
@@ -1341,6 +1447,129 @@ fn build_ui(app: &adw::Application) {
     let rgbp = stack.add_titled(&rgb_page, Some("rgb"), "Keyboard RGB");
     rgbp.set_icon_name(Some("input-keyboard-symbolic"));
 
+    // ── Mouse Logitech page ──
+    let m_sync = Rc::new(Cell::new(false));
+    let m_pending_dpi: Rc<Cell<Option<(u32, Instant)>>> = Rc::new(Cell::new(None));
+    let m_pending_hz: Rc<Cell<Option<(u32, Instant)>>> = Rc::new(Cell::new(None));
+    let m_debounce: Rc<Cell<Option<glib::SourceId>>> = Rc::new(Cell::new(None));
+    let mouse_page = adw::PreferencesPage::new();
+
+    let g_m = adw::PreferencesGroup::builder()
+        .title("Logitech G304 Lightspeed Wireless")
+        .description("Receiver USB 046d:C53F • Protocol HID++ 4.2")
+        .build();
+    let row_m_bat = adw::ActionRow::builder().title("Baterai Mouse G304: --%").subtitle("Memuat...").build();
+    let m_bat_bar = gtk::LevelBar::builder().min_value(0.0).max_value(100.0).valign(gtk::Align::Center).build();
+    m_bat_bar.set_size_request(110, 16);
+    row_m_bat.add_suffix(&m_bat_bar);
+    g_m.add(&row_m_bat);
+    mouse_page.add(&g_m);
+
+    // Polling rate
+    let g_hz = adw::PreferencesGroup::builder()
+        .title("Polling Rate (Frekuensi Transfer Data Hz)")
+        .description("Semakin tinggi semakin responsif")
+        .build();
+    let row_m_hz = adw::ActionRow::builder().title("Kecepatan Polling Rate saat Ini").subtitle("Memuat...").build();
+    let box_hz = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    box_hz.set_valign(gtk::Align::Center);
+    let mut hz_btns: Vec<(u32, gtk::Button)> = Vec::new();
+    for hz in [1000u32, 500, 250, 125] {
+        let b = seg_button(&format!("{} Hz", hz));
+        let pend = m_pending_hz.clone();
+        b.connect_clicked(move |_| {
+            run_user(vec![script_path("battery-mouse-logitech.sh"), "hz".into(), hz.to_string()]);
+            pend.set(Some((hz, Instant::now())));
+        });
+        box_hz.append(&b);
+        hz_btns.push((hz, b));
+    }
+    row_m_hz.add_suffix(&box_hz);
+    g_hz.add(&row_m_hz);
+    mouse_page.add(&g_hz);
+
+    // DPI
+    let g_dpi = adw::PreferencesGroup::builder().title("Sensitivitas Sensor Optik (DPI)").build();
+    let row_m_dpi = adw::ActionRow::builder().title("Nilai DPI Saat Ini").subtitle("-- DPI").build();
+    let scale_dpi = gtk::Scale::with_range(gtk::Orientation::Horizontal, 200.0, 12000.0, 50.0);
+    scale_dpi.set_size_request(180, -1);
+    scale_dpi.set_valign(gtk::Align::Center);
+    {
+        let st = m_sync.clone();
+        let pend = m_pending_dpi.clone();
+        let deb = m_debounce.clone();
+        scale_dpi.connect_value_changed(move |s| {
+            if st.get() {
+                return;
+            }
+            let dpi = s.value() as u32;
+            pend.set(Some((dpi, Instant::now())));
+            if let Some(id) = deb.take() {
+                id.remove();
+            }
+            let deb2 = deb.clone();
+            let id = glib::timeout_add_local(Duration::from_millis(90), move || {
+                run_user(vec![script_path("battery-mouse-logitech.sh"), "dpi".into(), dpi.to_string()]);
+                deb2.set(None);
+                glib::ControlFlow::Break
+            });
+            deb.set(Some(id));
+        });
+    }
+    row_m_dpi.add_suffix(&scale_dpi);
+    g_dpi.add(&row_m_dpi);
+    let row_dpi_presets = adw::ActionRow::builder().title("Preset DPI Populer").subtitle("Klik untuk ubah sensitivitas seketika").build();
+    let box_dpi = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    box_dpi.set_valign(gtk::Align::Center);
+    for dpi in [400u32, 800, 1200, 1600, 3200] {
+        let b = seg_button(&dpi.to_string());
+        let sc = scale_dpi.clone();
+        let st = m_sync.clone();
+        let pend = m_pending_dpi.clone();
+        b.connect_clicked(move |_| {
+            st.set(true);
+            sc.set_value(dpi as f64);
+            st.set(false);
+            pend.set(Some((dpi, Instant::now())));
+            run_user(vec![script_path("battery-mouse-logitech.sh"), "dpi".into(), dpi.to_string()]);
+        });
+        box_dpi.append(&b);
+    }
+    row_dpi_presets.add_suffix(&box_dpi);
+    g_dpi.add(&row_dpi_presets);
+    mouse_page.add(&g_dpi);
+
+    // Onboard + USB
+    let g_ob = adw::PreferencesGroup::builder().title("Profil Onboard Memory & Anti-Lag USB".replace('&', "&amp;").as_str()).build();
+    let switch_onboard = adw::SwitchRow::builder()
+        .title("Profil Onboard Memory (EEPROM)")
+        .subtitle("Gunakan profil tersimpan di memori fisik mouse G304")
+        .build();
+    {
+        let st = m_sync.clone();
+        switch_onboard.connect_active_notify(move |s| {
+            if st.get() {
+                return;
+            }
+            let val = if s.is_active() { "1" } else { "off" };
+            run_user(vec![script_path("battery-mouse-logitech.sh"), "onboard".into(), val.to_string()]);
+        });
+    }
+    g_ob.add(&switch_onboard);
+    let row_usb = adw::ActionRow::builder()
+        .title("Proteksi USB Autosuspend (Anti Micro-Stutter)")
+        .subtitle("Receiver G304 dikunci di mode Power ON (Bebas Lag)")
+        .build();
+    let lbl_usb = gtk::Label::new(Some("Aktif"));
+    lbl_usb.add_css_class("success");
+    lbl_usb.set_valign(gtk::Align::Center);
+    row_usb.add_suffix(&lbl_usb);
+    g_ob.add(&row_usb);
+    mouse_page.add(&g_ob);
+
+    let mp = stack.add_titled(&mouse_page, Some("mouse"), "Mouse Logitech");
+    mp.set_icon_name(Some("input-mouse-symbolic"));
+
     toolbar.set_content(Some(&stack));
     window.set_content(Some(&toolbar));
 
@@ -1390,6 +1619,16 @@ fn build_ui(app: &adw::Application) {
         switch_threshold,
         row_cpu_mon,
         sync,
+        row_m_bat,
+        m_bat_bar,
+        row_m_hz,
+        hz_btns,
+        row_m_dpi,
+        scale_dpi,
+        switch_onboard,
+        m_sync,
+        m_pending_dpi,
+        m_pending_hz,
     });
 
     let sh = shared.clone();
