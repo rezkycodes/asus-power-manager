@@ -1,12 +1,14 @@
 Package: asus-power-manager
-Version: 1.0.0
+Version: 2.0.0
 Section: utils
 Priority: optional
-Architecture: all
+Architecture: amd64
 Maintainer: Rezky P. Budihartono <rezky.codes@gmail.com>
-Depends: python3, python3-gi, gir1.2-gtk-4.0, gir1.2-adw-1, upower, udev, systemd
-Recommends: hdparm, tuned
-Description: Power & Battery Manager for ASUS & Linux Laptops
- Modern GTK4/Libadwaita power management and battery health control utility.
- Supports battery charge limits (80% health care), instant powersave/performance
- switching, clamshell server mode, and hardware stability hardening.
+Depends: libgtk-4-1, libadwaita-1-0, upower, udev, systemd
+Recommends: hdparm, tuned, nvidia-utils, solaar
+Description: Tweaks ASUS TUF — system monitor & hardware control (Rust/GTK4)
+ Native Rust/GTK4 + Libadwaita app for ASUS TUF Gaming laptops on Linux.
+ Realtime monitors for CPU, memory, GPU, fans, network, drives, battery,
+ processes and systemd services, plus hardware controls: battery charge limit
+ (80% health care), powersave/performance/auto CPU profiles, fan profiles,
+ GPU mode switching, keyboard RGB, and Logitech G304 tuning.

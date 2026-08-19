@@ -99,7 +99,7 @@ struct FanInfo {
 #[derive(Default, Clone)]
 struct NetInfo {
     iface: String,
-    kind: String,  // "Kabel"/"Nirkabel"/"Lainnya"
+    kind: String,  // "Wired"/"Wireless"/"Lainnya"
     model: String,
     mac: String,
     is_wireless: bool,
@@ -460,7 +460,7 @@ fn gather_static(sh: &Arc<Mutex<Shared>>, logical: usize) {
         .or_else(|| rd_u64("/sys/devices/system/cpu/cpu0/cpufreq/bios_limit"))
         .map(|khz| format!("{:.2}", khz as f64 / 1e6))
         .unwrap_or_default();
-    let (mut sockets, mut virt, mut vm) = ("1".to_string(), "—".to_string(), "Tidak".to_string());
+    let (mut sockets, mut virt, mut vm) = ("1".to_string(), "—".to_string(), "No".to_string());
     let (mut l1d, mut l1i, mut l2, mut l3) =
         (String::new(), String::new(), String::new(), String::new());
     if let Ok(out) = Command::new("lscpu").output() {
@@ -1332,12 +1332,12 @@ fn sample_bats(sh: &Arc<Mutex<Shared>>) {
             });
             let st = rn("status").unwrap_or_default();
             b.state = match st.as_str() {
-                "Full" => "Penuh".into(),
-                "Charging" => "Mengisi".into(),
+                "Full" => "Full".into(),
+                "Charging" => "Charging".into(),
                 "Discharging" => "Mengosongkan".into(),
-                "Not charging" => "Tidak mengisi".into(),
+                "Not charging" => "Not charging".into(),
                 s if !s.is_empty() => s.to_string(),
-                _ => "Tidak diketahui".into(),
+                _ => "Unknown".into(),
             };
             if b.is_system {
                 let volt = num("voltage_now").map(|v| v / 1e6).unwrap_or(0.0);
@@ -1371,7 +1371,7 @@ fn sample_bats(sh: &Arc<Mutex<Shared>>) {
                 b.capacity_health = if efd > 0.0 { ef / efd * 100.0 } else { 0.0 };
                 b.charge_threshold = match num("charge_control_end_threshold") {
                     Some(t) if t < 100.0 => "Ya".into(),
-                    Some(_) => "Tidak".into(),
+                    Some(_) => "No".into(),
                     None => "—".into(),
                 };
                 b.power_hist.push_back(b.power.max(0.0));
@@ -1421,9 +1421,9 @@ fn enumerate_nets() -> Vec<NetInfo> {
             let is_wireless = Path::new(&format!("{base}/wireless")).exists();
             let has_dev = Path::new(&format!("{base}/device")).exists();
             let (kind, rank) = if is_wireless {
-                ("Nirkabel", 1)
+                ("Wireless", 1)
             } else if has_dev {
-                ("Kabel", 0)
+                ("Wired", 0)
             } else {
                 ("Lainnya", 2)
             };
@@ -1532,10 +1532,10 @@ fn sample_nets(sh: &Arc<Mutex<Shared>>) {
                     if n.total_rx > 0 || n.total_tx > 0 {
                         "Terhubung".into()
                     } else {
-                        "Tidak diketahui".into()
+                        "Unknown".into()
                     }
                 }
-                "down" => "Tidak tersedia".into(),
+                "down" => "Unavailable".into(),
                 other if !other.is_empty() => other.to_string(),
                 _ => "—".into(),
             };
@@ -1714,8 +1714,8 @@ fn spawn_sampler(sh: Arc<Mutex<Shared>>) {
                     let gov = rd("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor").unwrap_or_default();
                     let drv = rd("/sys/devices/system/cpu/cpu0/cpufreq/scaling_driver").unwrap_or_default();
                     let boost = rd("/sys/devices/system/cpu/cpufreq/boost")
-                        .map(|b| if b == "1" { "Aktif" } else { "Nonaktif" })
-                        .unwrap_or("Nonaktif")
+                        .map(|b| if b == "1" { "Active" } else { "Inactive" })
+                        .unwrap_or("Inactive")
                         .to_string();
                     let profile = rd("/sys/firmware/acpi/platform_profile")
                         .map(|s| {
@@ -1812,7 +1812,7 @@ fn spawn_sampler(sh: Arc<Mutex<Shared>>) {
                     let up = if tick % 3 == 0 { Some(upower_battery()) } else { None };
                     let gpu = if tick % 3 == 0 { nvidia_telemetry() } else { None };
                     let gpu_tel = gpu.map(|(t, p, v, ps)| {
-                        format!("Suhu: {} • Daya: {} • VRAM: {} • P-State: {} ({})", t, p, v, ps, pci_status)
+                        format!("Temp: {} • Power: {} • VRAM: {} • P-State: {} ({})", t, p, v, ps, pci_status)
                     });
 
                     if let Ok(mut g) = sh.lock() {
@@ -1985,7 +1985,7 @@ const SYS_SVC: [(&str, &str, &str); 5] = [
     ("tailscaled.service", "Tailscale Mesh VPN", "Remote VPN"),
     ("sshd.service", "OpenSSH Server", "Port 22"),
     ("docker.service", "Docker Container Engine", "Runtime kontainer"),
-    ("battery-charge-threshold.service", "Batas Baterai 80% Service", "Proteksi hardware"),
+    ("battery-charge-threshold.service", "Battery Limit 80% Service", "Hardware protection"),
 ];
 
 fn systemctl_active(is_user: bool, unit: &str) -> String {
@@ -2137,7 +2137,7 @@ impl Ui {
         // CPU header + info
         self.row_model.set_title(&g.model);
         self.row_model.set_subtitle(&format!(
-            "Utilisasi: {}% • Kecepatan: {} GHz",
+            "Utilization: {}% • Speed: {} GHz",
             g.overall,
             if g.speed_ghz.is_empty() { "--" } else { &g.speed_ghz }
         ));
@@ -2169,25 +2169,25 @@ impl Ui {
         // Battery
         let pct_num: f64 = g.bat_cap.parse().unwrap_or(0.0);
         self.bat_bar.set_value(pct_num);
-        self.row_bat.set_title(&format!("Baterai: {}%", g.bat_cap));
+        self.row_bat.set_title(&format!("Battery: {}%", g.bat_cap));
         if g.ac_online {
             if g.threshold == "80" && pct_num >= 79.0 {
-                self.row_bat.set_subtitle("🔌 Tersambung Charger — Siaga (Batas 80%)");
-                self.row_drain.set_subtitle("Daya dari Adaptor (Baterai standby)");
+                self.row_bat.set_subtitle("🔌 Charger Connected — Standby (80% Limit)");
+                self.row_drain.set_subtitle("Powered by Adapter (Battery standby)");
             } else if g.bat_status.eq_ignore_ascii_case("charging") {
                 let tgt = if g.threshold != "100" { format!(" (Target {}%)", g.threshold) } else { String::new() };
-                self.row_bat.set_subtitle(&format!("⚡ Mengisi Daya{}", tgt));
-                self.row_drain.set_subtitle(&format!("{} (Pengisian)", if g.energy_rate.is_empty() { "Aktif" } else { &g.energy_rate }));
+                self.row_bat.set_subtitle(&format!("⚡ Charging{}", tgt));
+                self.row_drain.set_subtitle(&format!("{} (Charging)", if g.energy_rate.is_empty() { "Active" } else { &g.energy_rate }));
             } else {
-                self.row_bat.set_subtitle(&format!("🔌 Tersambung Charger ({})", g.bat_status));
-                self.row_drain.set_subtitle("Adaptor Aktif");
+                self.row_bat.set_subtitle(&format!("🔌 Charger Connected ({})", g.bat_status));
+                self.row_drain.set_subtitle("Adapter Active");
             }
         } else {
-            self.row_bat.set_subtitle("🔋 Mode Baterai (Tidak Dicas)");
-            self.row_drain.set_subtitle(&format!("{} (Konsumsi Beban)", if g.energy_rate.is_empty() { "Aktif" } else { &g.energy_rate }));
+            self.row_bat.set_subtitle("🔋 Battery Mode (Not Charging)");
+            self.row_drain.set_subtitle(&format!("{} (Load Draw)", if g.energy_rate.is_empty() { "Active" } else { &g.energy_rate }));
         }
-        let est = if !g.time_str.is_empty() && !g.ac_online { format!(" | Estimasi: {}", g.time_str) } else { String::new() };
-        self.row_health.set_subtitle(&format!("Kesehatan Sel: {}{}", if g.health_cap.is_empty() { "Normal" } else { &g.health_cap }, est));
+        let est = if !g.time_str.is_empty() && !g.ac_online { format!(" | Estimate: {}", g.time_str) } else { String::new() };
+        self.row_health.set_subtitle(&format!("Cell Health: {}{}", if g.health_cap.is_empty() { "Normal" } else { &g.health_cap }, est));
 
         // Threshold switch (guarded)
         let want = g.threshold == "80";
@@ -2211,7 +2211,7 @@ impl Ui {
             }
             "dedicated" | "2" => {
                 Self::set_active(&self.btn_gpu[2], true);
-                self.row_gpu_mode.set_subtitle("Mode: NVIDIA Dedicated (Performa penuh)");
+                self.row_gpu_mode.set_subtitle("Mode: NVIDIA Dedicated (Full performance)");
             }
             _ => {
                 Self::set_active(&self.btn_gpu[0], true);
@@ -2236,12 +2236,12 @@ impl Ui {
             Self::set_active(b, false);
         }
         let (fi, flabel) = match g.fan_policy.as_str() {
-            "2" => (0, "Silent / Hening (Kecepatan rendah)"),
-            "1" => (2, "Turbo / Overboost (Pendinginan cepat)"),
-            _ => (1, "Normal / Balanced (Otomatis)"),
+            "2" => (0, "Silent (Low speed)"),
+            "1" => (2, "Turbo / Overboost (Fast cooling)"),
+            _ => (1, "Normal / Balanced (Automatic)"),
         };
         Self::set_active(&self.btn_fan[fi], true);
-        self.row_fan_ctrl.set_subtitle(&format!("Status Aktif: {}", flabel));
+        self.row_fan_ctrl.set_subtitle(&format!("Active Status: {}", flabel));
 
         // CPU monitor
         self.row_cpu_mon.set_subtitle(&format!(
@@ -2255,16 +2255,16 @@ impl Ui {
         // ── Mouse ──
         let mbat: f64 = g.m_bat.parse().unwrap_or(90.0);
         self.m_bat_bar.set_value(mbat);
-        self.row_m_bat.set_title(&format!("Baterai Mouse G304: {}%", g.m_bat));
+        self.row_m_bat.set_title(&format!("G304 Mouse Battery: {}%", g.m_bat));
         let mstat = if g.m_status.eq_ignore_ascii_case("discharging")
             || g.m_status.eq_ignore_ascii_case("charging")
             || g.m_status.eq_ignore_ascii_case("full")
         {
-            "Tersambung (Aktif)"
+            "Connected (Active)"
         } else {
-            "Standby / Tidur"
+            "Standby / Sleep"
         };
-        self.row_m_bat.set_subtitle(&format!("Status: {} • Koneksi: Lightspeed Receiver", mstat));
+        self.row_m_bat.set_subtitle(&format!("Status: {} • Connection: Lightspeed Receiver", mstat));
 
         // Hz (honor pending user choice)
         let mut hz: u32 = g.m_hz.parse().unwrap_or(1000);
@@ -2278,9 +2278,9 @@ impl Ui {
             }
         }
         self.row_m_hz.set_subtitle(&format!(
-            "Aktif: {} Hz ({})",
+            "Active: {} Hz ({})",
             hz,
-            if hz == 1000 { "1ms Peak" } else { "Hemat Baterai" }
+            if hz == 1000 { "1ms Peak" } else { "Battery Saver" }
         ));
         for (v, b) in &self.hz_btns {
             Self::set_active(b, *v == hz);
@@ -2324,13 +2324,13 @@ impl Ui {
             s.toggle.remove_css_class("suggested-action");
             match state {
                 "active" => {
-                    s.badge.set_text("Aktif");
+                    s.badge.set_text("Active");
                     s.badge.add_css_class("badge-run");
                     s.toggle.set_label("Stop");
                     s.toggle.add_css_class("destructive-action");
                 }
                 "failed" => {
-                    s.badge.set_text("Gagal");
+                    s.badge.set_text("Failed");
                     s.badge.add_css_class("badge-fail");
                     s.toggle.set_label("Start");
                     s.toggle.add_css_class("suggested-action");
@@ -2341,7 +2341,7 @@ impl Ui {
                     s.toggle.set_label("Start");
                 }
                 _ => {
-                    s.badge.set_text("Mati");
+                    s.badge.set_text("Off");
                     s.badge.add_css_class("badge-stop");
                     s.toggle.set_label("Start");
                     s.toggle.add_css_class("suggested-action");
@@ -2350,8 +2350,8 @@ impl Ui {
         }
 
         // ── Memory ──
-        self.row_mem.set_title(&format!("Memori: {} total", fmt_gib(g.mem_total)));
-        self.row_mem.set_subtitle(&format!("Terpakai {} • {}%", fmt_gib(g.mem_used), g.mem_pct));
+        self.row_mem.set_title(&format!("Memory: {} total", fmt_gib(g.mem_total)));
+        self.row_mem.set_subtitle(&format!("Used {} • {}%", fmt_gib(g.mem_used), g.mem_pct));
         self.mem_bar.set_value(g.mem_pct as f64);
         let mset = |k: &str, v: String| {
             if let Some(l) = self.mem_lbl.get(k) {
@@ -2372,7 +2372,7 @@ impl Ui {
         self.swap_area.queue_draw();
 
         // ── Aplikasi & Proses ──
-        self.apps.row_hdr.set_subtitle(&format!("{} proses berjalan", g.proc_total));
+        self.apps.row_hdr.set_subtitle(&format!("{} processes running", g.proc_total));
         {
             let q = self.apps.query.borrow().clone();
             let matches = |p: &ProcInfo| {
@@ -2443,7 +2443,7 @@ impl Ui {
             let failed = g.svc_all.iter().filter(|u| u.active == "failed" || u.sub == "failed").count();
             self.svc_all
                 .row_hdr
-                .set_subtitle(&format!("{total} unit • {running} berjalan • {failed} gagal"));
+                .set_subtitle(&format!("{total} units • {running} running • {failed} failed"));
             let filt = self.svc_all.filter.get();
             let pass = |u: &SvcUnit| match filt {
                 1 => u.sub == "running",
@@ -2465,7 +2465,7 @@ impl Ui {
                     self.svc_all.list.remove(&r);
                 }
                 let want = self.svc_all.sel.borrow().clone();
-                for (label, grp_user) in [("Layanan Pengguna", true), ("Layanan Sistem", false)] {
+                for (label, grp_user) in [("User Services", true), ("System Services", false)] {
                     let mut items: Vec<&SvcUnit> =
                         g.svc_all.iter().filter(|u| u.is_user == grp_user && pass(u)).collect();
                     if items.is_empty() {
@@ -2729,8 +2729,8 @@ impl Ui {
                 self.nets.borrow_mut().push(nu);
             }
             let container = group_container(&inner, &tabs, "lucide-network");
-            self.stack.add_titled(&container, Some("net"), "Jaringan");
-            let row = sidebar_row("net", "Jaringan", "lucide-network");
+            self.stack.add_titled(&container, Some("net"), "Network");
+            let row = sidebar_row("net", "Network", "lucide-network");
             self.sidebar.insert(&row, pos);
             pos += 1;
             self.dyn_rows.borrow_mut().push(row);
@@ -2760,13 +2760,13 @@ impl Ui {
             for (i, info) in bats.iter().enumerate() {
                 let (page, bu) = build_bat_page(&self.shared, i, info);
                 let name = format!("b{i}");
-                inner.add_titled(&page, Some(&name), &format!("Baterai {i} ({})", info.name));
-                tabs.push((name, format!("Baterai {i} ({})", info.name)));
+                inner.add_titled(&page, Some(&name), &format!("Battery {i} ({})", info.name));
+                tabs.push((name, format!("Battery {i} ({})", info.name)));
                 self.bats.borrow_mut().push(bu);
             }
             let container = group_container(&inner, &tabs, "lucide-battery");
-            self.stack.add_titled(&container, Some("bat"), "Baterai");
-            let row = sidebar_row("bat", "Baterai", "lucide-battery");
+            self.stack.add_titled(&container, Some("bat"), "Battery");
+            let row = sidebar_row("bat", "Battery", "lucide-battery");
             self.sidebar.insert(&row, pos);
             self.dyn_rows.borrow_mut().push(row);
             self.dyn_pages.borrow_mut().push(container.upcast());
@@ -2784,10 +2784,10 @@ fn build_cpu_page(shared: &Arc<Mutex<Shared>>, ui_core: &mut Vec<gtk::DrawingAre
     let logical = shared.lock().map(|g| g.logical).unwrap_or(1);
     let page = adw::PreferencesPage::new();
 
-    let g_head = adw::PreferencesGroup::builder().title("Prosesor").build();
+    let g_head = adw::PreferencesGroup::builder().title("Processor").build();
     let row_model = adw::ActionRow::builder()
-        .title("Memuat model CPU...")
-        .subtitle("Utilisasi: --% • Kecepatan: -- GHz")
+        .title("Loading CPU model...")
+        .subtitle("Utilization: --% • Speed: -- GHz")
         .build();
     let util_bar = gtk::LevelBar::builder().min_value(0.0).max_value(100.0).valign(gtk::Align::Center).build();
     util_bar.set_size_request(110, 16);
@@ -2796,8 +2796,8 @@ fn build_cpu_page(shared: &Arc<Mutex<Shared>>, ui_core: &mut Vec<gtk::DrawingAre
     page.add(&g_head);
 
     let g_cores = adw::PreferencesGroup::builder()
-        .title("Utilisasi per-Core (1 menit)")
-        .description("Grafik realtime penggunaan tiap core logis (0–100%)")
+        .title("Per-Core Utilization (1 minute)")
+        .description("Realtime usage per logical core (0–100%)")
         .build();
     let grid = gtk::Grid::new();
     grid.set_row_spacing(8);
@@ -2826,7 +2826,7 @@ fn build_cpu_page(shared: &Arc<Mutex<Shared>>, ui_core: &mut Vec<gtk::DrawingAre
     g_cores.add(&grid);
     page.add(&g_cores);
 
-    let g_temp = adw::PreferencesGroup::builder().title("Suhu CPU (1 menit)").build();
+    let g_temp = adw::PreferencesGroup::builder().title("CPU Temperature (1 minute)").build();
     let temp_area = gtk::DrawingArea::new();
     temp_area.set_content_height(140);
     temp_area.set_hexpand(true);
@@ -2844,11 +2844,11 @@ fn build_cpu_page(shared: &Arc<Mutex<Shared>>, ui_core: &mut Vec<gtk::DrawingAre
     g_temp.add(&temp_area);
     page.add(&g_temp);
 
-    let g_info = adw::PreferencesGroup::builder().title("Informasi Detail").build();
+    let g_info = adw::PreferencesGroup::builder().title("Detailed Information").build();
     let mut l = std::collections::HashMap::new();
-    l.insert("speed", info_row("Kecepatan Saat Ini", &g_info));
+    l.insert("speed", info_row("Current Speed", &g_info));
     l.insert("base", info_row("Base Speed", &g_info));
-    l.insert("logical", info_row("Prosesor Logis", &g_info));
+    l.insert("logical", info_row("Logical Processors", &g_info));
     l.insert("sockets", info_row("Socket", &g_info));
     l.insert("virt", info_row("Virtualisasi", &g_info));
     l.insert("vm", info_row("Virtual Machine", &g_info));
@@ -2857,9 +2857,9 @@ fn build_cpu_page(shared: &Arc<Mutex<Shared>>, ui_core: &mut Vec<gtk::DrawingAre
     l.insert("l3", info_row("Cache L3", &g_info));
     l.insert("driver", info_row("Cpufreq Driver", &g_info));
     l.insert("gov", info_row("Cpufreq Governor", &g_info));
-    l.insert("pth", info_row("Proses / Thread / Handle", &g_info));
-    l.insert("uptime", info_row("Uptime Sistem", &g_info));
-    l.insert("temp", info_row("Suhu CPU", &g_info));
+    l.insert("pth", info_row("Processes / Threads / Handles", &g_info));
+    l.insert("uptime", info_row("System Uptime", &g_info));
+    l.insert("temp", info_row("CPU Temperature", &g_info));
     page.add(&g_info);
 
     (page, row_model, util_bar, temp_area, l)
@@ -2930,8 +2930,8 @@ fn build_rgb_page() -> adw::PreferencesPage {
     let page = adw::PreferencesPage::new();
 
     // Preview
-    let g_prev = adw::PreferencesGroup::builder().title("Status Warna &amp; Efek Aktif").build();
-    let row_prev = adw::ActionRow::builder().title("Warna Keyboard Saat Ini").build();
+    let g_prev = adw::PreferencesGroup::builder().title("Active Color &amp; Effect Status").build();
+    let row_prev = adw::ActionRow::builder().title("Current Keyboard Color").build();
     let preview = gtk::DrawingArea::new();
     preview.set_content_width(52);
     preview.set_content_height(28);
@@ -2995,8 +2995,8 @@ fn build_rgb_page() -> adw::PreferencesPage {
     };
 
     // Color picker
-    let g_pick = adw::PreferencesGroup::builder().title("Pilih Warna Bebas (Color Wheel)").build();
-    let row_pick = adw::ActionRow::builder().title("Dialog Spektrum Warna").subtitle("Buka pemilih warna GNOME").build();
+    let g_pick = adw::PreferencesGroup::builder().title("Custom Color (Color Wheel)").build();
+    let row_pick = adw::ActionRow::builder().title("Color Spectrum Dialog").subtitle("Open GNOME color picker").build();
     let dialog = gtk::ColorDialog::new();
     dialog.set_with_alpha(false);
     let color_btn = gtk::ColorDialogButton::new(Some(dialog));
@@ -3100,8 +3100,8 @@ fn build_rgb_page() -> adw::PreferencesPage {
 
     // Palette presets
     let g_pal = adw::PreferencesGroup::builder()
-        .title("Palet Warna Cepat (Preset)")
-        .description("Klik warna untuk menerapkannya seketika")
+        .title("Quick Color Palette (Preset)")
+        .description("Click a color to apply it instantly")
         .build();
     let pal_row = adw::PreferencesRow::builder().activatable(false).build();
     let pal_box = gtk::Box::new(gtk::Orientation::Horizontal, 10);
@@ -3159,16 +3159,16 @@ fn build_rgb_page() -> adw::PreferencesPage {
     page.add(&g_sl);
 
     // Effects
-    let g_eff = adw::PreferencesGroup::builder().title("Efek Animasi (Aura Lighting)").build();
+    let g_eff = adw::PreferencesGroup::builder().title("Animation Effects (Aura Lighting)").build();
     let effects = [
-        ("0", "Static (Warna Tetap)"),
-        ("1", "Breathing (Pernapasan)"),
-        ("10", "Pulse (Denyut)"),
+        ("0", "Static (Fixed Color)"),
+        ("1", "Breathing"),
+        ("10", "Pulse"),
         ("2", "Color Cycle (Rainbow)"),
-        ("3", "Strobing (Berkedip)"),
+        ("3", "Strobing"),
     ];
     let eff_btns: Rc<Vec<(String, gtk::Button)>> = Rc::new(
-        effects.iter().map(|(id, _)| (id.to_string(), gtk::Button::with_label("Pilih"))).collect(),
+        effects.iter().map(|(id, _)| (id.to_string(), gtk::Button::with_label("Select"))).collect(),
     );
     let highlight_eff: Rc<dyn Fn(&str)> = {
         let eb = eff_btns.clone();
@@ -3176,10 +3176,10 @@ fn build_rgb_page() -> adw::PreferencesPage {
             for (id, b) in eb.iter() {
                 if id == active {
                     b.add_css_class("suggested-action");
-                    b.set_label("✓ Aktif");
+                    b.set_label("✓ Active");
                 } else {
                     b.remove_css_class("suggested-action");
-                    b.set_label("Pilih");
+                    b.set_label("Select");
                 }
             }
         })
@@ -3205,13 +3205,13 @@ fn build_rgb_page() -> adw::PreferencesPage {
     page.add(&g_eff);
 
     // Brightness + Speed
-    let g_bs = adw::PreferencesGroup::builder().title("Kecerahan &amp; Kecepatan Efek").build();
+    let g_bs = adw::PreferencesGroup::builder().title("Brightness &amp; Effect Speed").build();
     // brightness
-    let row_b = adw::ActionRow::builder().title("Kecerahan Lampu Keyboard").build();
+    let row_b = adw::ActionRow::builder().title("Keyboard Backlight Brightness").build();
     let box_b = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     box_b.set_valign(gtk::Align::Center);
     let bri_btns: Rc<Vec<(u8, gtk::Button)>> = Rc::new(
-        [(0u8, "Mati"), (1, "Redup"), (2, "Sedang"), (3, "Terang")]
+        [(0u8, "Off"), (1, "Dim"), (2, "Medium"), (3, "Bright")]
             .iter()
             .map(|(v, l)| (*v, gtk::Button::with_label(l)))
             .collect(),
@@ -3244,11 +3244,11 @@ fn build_rgb_page() -> adw::PreferencesPage {
     row_b.add_suffix(&box_b);
     g_bs.add(&row_b);
     // speed
-    let row_s = adw::ActionRow::builder().title("Kecepatan Animasi Efek").build();
+    let row_s = adw::ActionRow::builder().title("Effect Animation Speed").build();
     let box_s = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     box_s.set_valign(gtk::Align::Center);
     let spd_btns: Rc<Vec<(String, gtk::Button)>> = Rc::new(
-        [("0", "Lambat"), ("1", "Sedang"), ("2", "Cepat")]
+        [("0", "Slow"), ("1", "Medium"), ("2", "Fast")]
             .iter()
             .map(|(v, l)| (v.to_string(), gtk::Button::with_label(l)))
             .collect(),
@@ -3312,7 +3312,7 @@ fn sysctl_capture(is_user: bool, verb: &str, unit: &str) -> String {
             }
             let s = s.trim_end().to_string();
             if s.is_empty() {
-                "(kosong)".into()
+                "(empty)".into()
             } else {
                 s
             }
@@ -3330,7 +3330,7 @@ fn journal_capture(is_user: bool, unit: &str) -> String {
         Ok(o) => {
             let s = String::from_utf8_lossy(&o.stdout).trim_end().to_string();
             if s.is_empty() {
-                "(belum ada catatan log)".into()
+                "(no log entries yet)".into()
             } else {
                 s
             }
@@ -3360,7 +3360,7 @@ fn scrolled(child: &impl IsA<gtk::Widget>, min_h: i32) -> gtk::ScrolledWindow {
 fn open_service_detail(parent: &adw::ApplicationWindow, is_user: bool, unit: &str) {
     let unit = unit.to_string();
     let win = adw::Window::new();
-    win.set_title(Some(&format!("Detail — {unit}")));
+    win.set_title(Some(&format!("Details — {unit}")));
     win.set_default_size(620, 740);
     win.set_modal(true);
     win.set_transient_for(Some(parent));
@@ -3368,7 +3368,7 @@ fn open_service_detail(parent: &adw::ApplicationWindow, is_user: bool, unit: &st
     let tv_view = adw::ToolbarView::new();
     let header = adw::HeaderBar::new();
     let refresh_btn = gtk::Button::from_icon_name("view-refresh-symbolic");
-    refresh_btn.set_tooltip_text(Some("Segarkan"));
+    refresh_btn.set_tooltip_text(Some("Refresh"));
     header.pack_end(&refresh_btn);
     tv_view.add_top_bar(&header);
 
@@ -3388,7 +3388,7 @@ fn open_service_detail(parent: &adw::ApplicationWindow, is_user: bool, unit: &st
     vbox.append(&mk_label(&format!(
         "{} — {}",
         unit,
-        if is_user { "Layanan Pengguna (--user)" } else { "Layanan Sistem (root)" }
+        if is_user { "User Service (--user)" } else { "System Service (root)" }
     )));
     vbox.append(&mk_label("Status Operasional"));
     let tv_status = detail_textview(true);
@@ -3472,9 +3472,9 @@ fn build_svc_group(
             .build();
         let bx = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         bx.set_valign(gtk::Align::Center);
-        let badge = gtk::Label::new(Some("Memuat"));
+        let badge = gtk::Label::new(Some("Loading"));
         badge.add_css_class("badge-stop");
-        let toggle = seg_button("Mulai");
+        let toggle = seg_button("Start");
         let restart = seg_button("Restart");
         let key = format!("{}:{}", if is_user { "user" } else { "sys" }, unit);
         {
@@ -3509,7 +3509,7 @@ fn build_svc_group(
         bx.append(&badge);
         bx.append(&toggle);
         bx.append(&restart);
-        let detail = seg_button("Detail");
+        let detail = seg_button("Details");
         {
             let win = window.clone();
             let unit = unit.to_string();
@@ -3603,15 +3603,15 @@ type MemPage = (
 fn build_memory_page(shared: &Arc<Mutex<Shared>>) -> MemPage {
     let page = adw::PreferencesPage::new();
 
-    let g_head = adw::PreferencesGroup::builder().title("Memori Sistem").build();
-    let row_mem = adw::ActionRow::builder().title("Memori").subtitle("Memuat...").build();
+    let g_head = adw::PreferencesGroup::builder().title("System Memory").build();
+    let row_mem = adw::ActionRow::builder().title("Memory").subtitle("Loading...").build();
     let mem_bar = gtk::LevelBar::builder().min_value(0.0).max_value(100.0).valign(gtk::Align::Center).build();
     mem_bar.set_size_request(110, 16);
     row_mem.add_suffix(&mem_bar);
     g_head.add(&row_mem);
     page.add(&g_head);
 
-    let g_mem = adw::PreferencesGroup::builder().title("Penggunaan Memori (1 menit)").build();
+    let g_mem = adw::PreferencesGroup::builder().title("Memory Usage (1 minute)").build();
     let mem_area = gtk::DrawingArea::new();
     mem_area.set_content_height(150);
     mem_area.set_hexpand(true);
@@ -3629,7 +3629,7 @@ fn build_memory_page(shared: &Arc<Mutex<Shared>>) -> MemPage {
     g_mem.add(&mem_area);
     page.add(&g_mem);
 
-    let g_swap = adw::PreferencesGroup::builder().title("Swap (1 menit)").build();
+    let g_swap = adw::PreferencesGroup::builder().title("Swap (1 minute)").build();
     let swap_area = gtk::DrawingArea::new();
     swap_area.set_content_height(110);
     swap_area.set_hexpand(true);
@@ -3649,21 +3649,21 @@ fn build_memory_page(shared: &Arc<Mutex<Shared>>) -> MemPage {
 
     let g_det = adw::PreferencesGroup::builder().title("Rincian").build();
     let mut mem_lbl = std::collections::HashMap::new();
-    mem_lbl.insert("used", info_row("Sedang Dipakai (In Use)", &g_det));
-    mem_lbl.insert("avail", info_row("Tersedia (Available)", &g_det));
+    mem_lbl.insert("used", info_row("In Use", &g_det));
+    mem_lbl.insert("avail", info_row("Available", &g_det));
     mem_lbl.insert("committed", info_row("Committed", &g_det));
     mem_lbl.insert("cached", info_row("Cached", &g_det));
-    mem_lbl.insert("swapused", info_row("Swap Terpakai", &g_det));
-    mem_lbl.insert("swapavail", info_row("Swap Tersedia", &g_det));
+    mem_lbl.insert("swapused", info_row("Swap Used", &g_det));
+    mem_lbl.insert("swapavail", info_row("Swap Available", &g_det));
     page.add(&g_det);
 
     let g_hw = adw::PreferencesGroup::builder()
-        .title("Perangkat Keras (DIMM)")
+        .title("Hardware (DIMM)")
         .build();
     mem_lbl.insert("dtype", info_row("Tipe", &g_hw));
     mem_lbl.insert("dform", info_row("Form Factor", &g_hw));
-    mem_lbl.insert("dspeed", info_row("Kecepatan", &g_hw));
-    mem_lbl.insert("dslots", info_row("Slot Terpakai", &g_hw));
+    mem_lbl.insert("dspeed", info_row("Speed", &g_hw));
+    mem_lbl.insert("dslots", info_row("Slots Used", &g_hw));
     page.add(&g_hw);
 
     (page, row_mem, mem_bar, mem_area, swap_area, mem_lbl)
@@ -3694,7 +3694,7 @@ fn build_drive_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &DriveInfo) -
     g_head.add(&row);
     page.add(&g_head);
 
-    let g_active = adw::PreferencesGroup::builder().title("Waktu Aktif (1 menit)").build();
+    let g_active = adw::PreferencesGroup::builder().title("Active Time (1 minute)").build();
     let active_area = gtk::DrawingArea::new();
     active_area.set_content_height(130);
     active_area.set_hexpand(true);
@@ -3714,7 +3714,7 @@ fn build_drive_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &DriveInfo) -
     g_active.add(&active_area);
     page.add(&g_active);
 
-    let g_thru = adw::PreferencesGroup::builder().title("Throughput (1 menit)").build();
+    let g_thru = adw::PreferencesGroup::builder().title("Throughput (1 minute)").build();
     let thru_scale = gtk::Label::new(Some("0 KiB/s"));
     thru_scale.add_css_class("dim-label");
     g_thru.set_header_suffix(Some(&thru_scale));
@@ -3739,16 +3739,16 @@ fn build_drive_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &DriveInfo) -
     page.add(&g_thru);
 
     let mut lbl = std::collections::HashMap::new();
-    let g_stat = adw::PreferencesGroup::builder().title("Statistik").build();
-    lbl.insert("rspeed", info_row("Kecepatan Baca", &g_stat));
-    lbl.insert("wspeed", info_row("Kecepatan Tulis", &g_stat));
-    lbl.insert("tread", info_row("Total Dibaca", &g_stat));
-    lbl.insert("twrite", info_row("Total Ditulis", &g_stat));
-    lbl.insert("active", info_row("Waktu Aktif", &g_stat));
-    lbl.insert("resp", info_row("Rata-rata Respons", &g_stat));
+    let g_stat = adw::PreferencesGroup::builder().title("Statistics").build();
+    lbl.insert("rspeed", info_row("Read Speed", &g_stat));
+    lbl.insert("wspeed", info_row("Write Speed", &g_stat));
+    lbl.insert("tread", info_row("Total Read", &g_stat));
+    lbl.insert("twrite", info_row("Total Written", &g_stat));
+    lbl.insert("active", info_row("Active Time", &g_stat));
+    lbl.insert("resp", info_row("Avg Response", &g_stat));
     page.add(&g_stat);
 
-    let g_det = adw::PreferencesGroup::builder().title("Detail").build();
+    let g_det = adw::PreferencesGroup::builder().title("Details").build();
     let det = |t: &str, v: &str, gr: &adw::PreferencesGroup| {
         let l = info_row(t, gr);
         // Long IDs (e.g. WWN) must not steal the row width and wrap the title.
@@ -3758,9 +3758,9 @@ fn build_drive_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &DriveInfo) -
         l.set_selectable(true);
         l.set_text(v);
     };
-    det("Kapasitas", &fmt_bytes(info.capacity), &g_det);
+    det("Capacity", &fmt_bytes(info.capacity), &g_det);
     det("Terformat", &fmt_bytes(info.formatted), &g_det);
-    det("Disk Sistem", if info.is_system { "Ya" } else { "Tidak" }, &g_det);
+    det("System Disk", if info.is_system { "Ya" } else { "No" }, &g_det);
     det("Tipe", &info.kind, &g_det);
     det("WWN", if info.wwn.is_empty() { "—" } else { &info.wwn }, &g_det);
     det("Serial", if info.serial.is_empty() { "—" } else { &info.serial }, &g_det);
@@ -3774,7 +3774,7 @@ fn build_drive_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &DriveInfo) -
         let g_part = adw::PreferencesGroup::builder().title("Partisi").build();
         for p in &info.partitions {
             let sub = if p.mount.is_empty() {
-                if p.fstype.is_empty() { "tidak terpasang".to_string() } else { p.fstype.clone() }
+                if p.fstype.is_empty() { "not mounted".to_string() } else { p.fstype.clone() }
             } else {
                 format!("{} • {}", if p.fstype.is_empty() { "?" } else { &p.fstype }, p.mount)
             };
@@ -3814,8 +3814,8 @@ fn build_drive_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &DriveInfo) -
 // Classify a sidebar row into a section, for the list header func.
 fn sidebar_section(name: &str) -> &'static str {
     match name {
-        "cpu" | "memory" | "gpu" | "fan" | "net" | "drive" | "bat" => "Pemantauan",
-        _ => "Kontrol & Sistem",
+        "cpu" | "memory" | "gpu" | "fan" | "net" | "drive" | "bat" => "Monitoring",
+        _ => "Control & System",
     }
 }
 
@@ -3910,7 +3910,7 @@ fn build_gpu_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &GpuInfo) -> (a
     g_head.add(&row);
     page.add(&g_head);
 
-    let g_util = adw::PreferencesGroup::builder().title("Utilisasi (1 menit)").build();
+    let g_util = adw::PreferencesGroup::builder().title("Utilization (1 minute)").build();
     let util_area = gtk::DrawingArea::new();
     util_area.set_content_height(130);
     util_area.set_hexpand(true);
@@ -3930,7 +3930,7 @@ fn build_gpu_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &GpuInfo) -> (a
     g_util.add(&util_area);
     page.add(&g_util);
 
-    let g_mem = adw::PreferencesGroup::builder().title("Penggunaan Memori (1 menit)").build();
+    let g_mem = adw::PreferencesGroup::builder().title("Memory Usage (1 minute)").build();
     let mem_area = gtk::DrawingArea::new();
     mem_area.set_content_height(130);
     mem_area.set_hexpand(true);
@@ -3951,17 +3951,17 @@ fn build_gpu_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &GpuInfo) -> (a
     page.add(&g_mem);
 
     let mut lbl = std::collections::HashMap::new();
-    let g_stat = adw::PreferencesGroup::builder().title("Statistik").build();
+    let g_stat = adw::PreferencesGroup::builder().title("Statistics").build();
     lbl.insert("util", info_row("Utilisasi", &g_stat));
     lbl.insert("clock", info_row("Clock", &g_stat));
-    lbl.insert("power", info_row("Daya", &g_stat));
-    lbl.insert("mem", info_row("Memori", &g_stat));
-    lbl.insert("memclk", info_row("Kecepatan Memori", &g_stat));
+    lbl.insert("power", info_row("Power", &g_stat));
+    lbl.insert("mem", info_row("Memory", &g_stat));
+    lbl.insert("memclk", info_row("Memory Speed", &g_stat));
     lbl.insert("encdec", info_row("Encode / Decode", &g_stat));
-    lbl.insert("temp", info_row("Suhu", &g_stat));
+    lbl.insert("temp", info_row("Temperature", &g_stat));
     page.add(&g_stat);
 
-    let g_det = adw::PreferencesGroup::builder().title("Detail").build();
+    let g_det = adw::PreferencesGroup::builder().title("Details").build();
     let det = |t: &str, v: &str, gr: &adw::PreferencesGroup| {
         let l = info_row(t, gr);
         l.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
@@ -3970,7 +3970,7 @@ fn build_gpu_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &GpuInfo) -> (a
         l.set_text(v);
     };
     det("Tipe", &info.kind, &g_det);
-    det("Nama", &info.name, &g_det);
+    det("Name", &info.name, &g_det);
     det("Bus PCI", if info.bus.is_empty() { "—" } else { &info.bus }, &g_det);
     let lbl_pcie = info_row("PCI Express", &g_det);
     lbl.insert("pcie", lbl_pcie);
@@ -3993,11 +3993,11 @@ fn build_fan_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &FanInfo) -> (a
     let page = adw::PreferencesPage::new();
 
     let g_head = adw::PreferencesGroup::builder().title(info.label.clone()).build();
-    let row = adw::ActionRow::builder().title("Kipas").subtitle(info.label.clone()).build();
+    let row = adw::ActionRow::builder().title("Fan").subtitle(info.label.clone()).build();
     g_head.add(&row);
     page.add(&g_head);
 
-    let g_graph = adw::PreferencesGroup::builder().title("Kecepatan Kipas (1 menit)").build();
+    let g_graph = adw::PreferencesGroup::builder().title("Fan Speed (1 minute)").build();
     let scale_lbl = gtk::Label::new(Some("0 RPM"));
     scale_lbl.add_css_class("dim-label");
     g_graph.set_header_suffix(Some(&scale_lbl));
@@ -4021,8 +4021,8 @@ fn build_fan_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &FanInfo) -> (a
     g_graph.add(&area);
     page.add(&g_graph);
 
-    let g_stat = adw::PreferencesGroup::builder().title("Statistik").build();
-    let rpm_lbl = info_row("Kecepatan Kipas", &g_stat);
+    let g_stat = adw::PreferencesGroup::builder().title("Statistics").build();
+    let rpm_lbl = info_row("Fan Speed", &g_stat);
     page.add(&g_stat);
 
     let fu = FanUi { idx, area, scale_lbl, rpm_lbl };
@@ -4073,7 +4073,7 @@ fn build_net_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &NetInfo) -> (a
     g_head.add(&row);
     page.add(&g_head);
 
-    let g_graph = adw::PreferencesGroup::builder().title("Throughput (1 menit)").build();
+    let g_graph = adw::PreferencesGroup::builder().title("Throughput (1 minute)").build();
     let scale_lbl = gtk::Label::new(Some("0 Kbps"));
     scale_lbl.add_css_class("dim-label");
     g_graph.set_header_suffix(Some(&scale_lbl));
@@ -4125,14 +4125,14 @@ fn build_net_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &NetInfo) -> (a
     page.add(&g_graph);
 
     let mut lbl = std::collections::HashMap::new();
-    let g_stat = adw::PreferencesGroup::builder().title("Statistik").build();
+    let g_stat = adw::PreferencesGroup::builder().title("Statistics").build();
     lbl.insert("rspeed", info_row("Terima", &g_stat));
     lbl.insert("sspeed", info_row("Kirim", &g_stat));
-    lbl.insert("trx", info_row("Total Diterima", &g_stat));
-    lbl.insert("ttx", info_row("Total Terkirim", &g_stat));
+    lbl.insert("trx", info_row("Total Received", &g_stat));
+    lbl.insert("ttx", info_row("Total Sent", &g_stat));
     page.add(&g_stat);
 
-    let g_det = adw::PreferencesGroup::builder().title("Detail").build();
+    let g_det = adw::PreferencesGroup::builder().title("Details").build();
     let det = |t: &'static str, gr: &adw::PreferencesGroup, lm: &mut std::collections::HashMap<&'static str, gtk::Label>, key: &'static str| {
         let l = info_row(t, gr);
         l.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
@@ -4141,15 +4141,15 @@ fn build_net_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &NetInfo) -> (a
         lm.insert(key, l);
     };
     // static rows
-    let l_iface = info_row("Nama Interface", &g_det);
+    let l_iface = info_row("Interface Name", &g_det);
     l_iface.set_text(&info.iface);
-    let l_type = info_row("Tipe Koneksi", &g_det);
+    let l_type = info_row("Connection Type", &g_det);
     l_type.set_text(&info.kind);
     lbl.insert("status", info_row("Status", &g_det));
     if info.is_wireless {
         det("SSID", &g_det, &mut lbl, "ssid");
         lbl.insert("signal", info_row("Kekuatan Sinyal", &g_det));
-        lbl.insert("freq", info_row("Frekuensi", &g_det));
+        lbl.insert("freq", info_row("Frequency", &g_det));
     }
     det("Alamat Hardware", &g_det, &mut lbl, "mac");
     if let Some(l) = lbl.get("mac") {
@@ -4177,10 +4177,10 @@ struct BatUi {
 fn build_bat_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &BatInfo) -> (adw::PreferencesPage, BatUi) {
     let page = adw::PreferencesPage::new();
 
-    let g_head = adw::PreferencesGroup::builder().title(format!("Baterai {idx}")).build();
+    let g_head = adw::PreferencesGroup::builder().title(format!("Battery {idx}")).build();
     let row = adw::ActionRow::builder()
         .title(if info.model.is_empty() { info.name.clone() } else { info.model.clone() })
-        .subtitle(if info.is_system { "Baterai Sistem" } else { "Perangkat" })
+        .subtitle(if info.is_system { "System Battery" } else { "Peripheral" })
         .build();
     g_head.add(&row);
     page.add(&g_head);
@@ -4188,7 +4188,7 @@ fn build_bat_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &BatInfo) -> (a
     // System battery: Power Input graph
     let (mut power_area, mut power_scale) = (None, None);
     if info.is_system {
-        let g_pow = adw::PreferencesGroup::builder().title("Daya Masuk (1 menit)").build();
+        let g_pow = adw::PreferencesGroup::builder().title("Power Input (1 minute)").build();
         let ps = gtk::Label::new(Some("0.00 W"));
         ps.add_css_class("dim-label");
         g_pow.set_header_suffix(Some(&ps));
@@ -4217,7 +4217,7 @@ fn build_bat_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &BatInfo) -> (a
 
     // Charge / percentage graph
     let g_pct = adw::PreferencesGroup::builder()
-        .title(if info.is_system { "Muatan (1 menit)" } else { "Persentase (1 menit)" })
+        .title(if info.is_system { "Charge (1 minute)" } else { "Percentage (1 minute)" })
         .build();
     let pct_area = gtk::DrawingArea::new();
     pct_area.set_content_height(130);
@@ -4239,19 +4239,19 @@ fn build_bat_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &BatInfo) -> (a
     page.add(&g_pct);
 
     let mut lbl = std::collections::HashMap::new();
-    let g_stat = adw::PreferencesGroup::builder().title("Statistik").build();
+    let g_stat = adw::PreferencesGroup::builder().title("Statistics").build();
     lbl.insert("pct", info_row("Persentase", &g_stat));
     if info.is_system {
-        lbl.insert("volt", info_row("Tegangan", &g_stat));
-        lbl.insert("power", info_row("Daya", &g_stat));
+        lbl.insert("volt", info_row("Voltage", &g_stat));
+        lbl.insert("power", info_row("Power", &g_stat));
     }
     lbl.insert("state", info_row("Status", &g_stat));
     if info.is_system {
-        lbl.insert("cycles", info_row("Siklus Pengisian", &g_stat));
+        lbl.insert("cycles", info_row("Charge Cycles", &g_stat));
     }
     page.add(&g_stat);
 
-    let g_det = adw::PreferencesGroup::builder().title("Detail").build();
+    let g_det = adw::PreferencesGroup::builder().title("Details").build();
     let det = |t: &'static str, gr: &adw::PreferencesGroup, lm: &mut std::collections::HashMap<&'static str, gtk::Label>, key: &'static str| {
         let l = info_row(t, gr);
         l.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
@@ -4261,16 +4261,16 @@ fn build_bat_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &BatInfo) -> (a
     };
     det("Serial", &g_det, &mut lbl, "serial");
     let l_type = info_row("Tipe", &g_det);
-    l_type.set_text(if info.is_system { "Baterai" } else { "Perangkat" });
+    l_type.set_text(if info.is_system { "Battery" } else { "Peripheral" });
     let l_pw = info_row("Powering System", &g_det);
-    l_pw.set_text(if info.is_system { "Ya" } else { "Tidak" });
+    l_pw.set_text(if info.is_system { "Ya" } else { "No" });
     if info.is_system {
         lbl.insert("tech", info_row("Teknologi", &g_det));
-        lbl.insert("health", info_row("Kapasitas (Kesehatan)", &g_det));
+        lbl.insert("health", info_row("Capacity (Health)", &g_det));
         lbl.insert("ef", info_row("Energy Full", &g_det));
         lbl.insert("efd", info_row("Energy Full (desain)", &g_det));
         lbl.insert("vmin", info_row("Voltage min (desain)", &g_det));
-        lbl.insert("thr", info_row("Ambang Pengisian", &g_det));
+        lbl.insert("thr", info_row("Charge Threshold", &g_det));
     }
     page.add(&g_det);
 
@@ -4303,11 +4303,11 @@ struct AppsUi {
 fn build_apps_page(_shared: &Arc<Mutex<Shared>>) -> (adw::PreferencesPage, AppsUi) {
     let page = adw::PreferencesPage::new();
 
-    let g_head = adw::PreferencesGroup::builder().title("Aplikasi &amp; Proses").build();
-    let row_hdr = adw::ActionRow::builder().title("Proses").subtitle("Memuat...").build();
+    let g_head = adw::PreferencesGroup::builder().title("Applications &amp; Processes").build();
+    let row_hdr = adw::ActionRow::builder().title("Processes").subtitle("Loading...").build();
     let sel: Rc<Cell<Option<u32>>> = Rc::new(Cell::new(None));
-    let btn_stop = gtk::Button::builder().label("Hentikan").valign(gtk::Align::Center).build();
-    let btn_kill = gtk::Button::builder().label("Paksa").valign(gtk::Align::Center).build();
+    let btn_stop = gtk::Button::builder().label("Stop").valign(gtk::Align::Center).build();
+    let btn_kill = gtk::Button::builder().label("Force").valign(gtk::Align::Center).build();
     btn_kill.add_css_class("destructive-action");
     {
         let sel = sel.clone();
@@ -4330,10 +4330,10 @@ fn build_apps_page(_shared: &Arc<Mutex<Shared>>) -> (adw::PreferencesPage, AppsU
     g_head.add(&row_hdr);
     page.add(&g_head);
 
-    let g_tbl = adw::PreferencesGroup::builder().title("Proses (menurut pemakaian CPU)").build();
+    let g_tbl = adw::PreferencesGroup::builder().title("Processes (by CPU usage)").build();
     let query: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
     let search = gtk::SearchEntry::new();
-    search.set_placeholder_text(Some("Cari nama / PID / port..."));
+    search.set_placeholder_text(Some("Search name / PID / port..."));
     search.set_hexpand(true);
     search.set_margin_start(4);
     search.set_margin_end(4);
@@ -4360,10 +4360,10 @@ fn build_apps_page(_shared: &Arc<Mutex<Shared>>) -> (adw::PreferencesPage, AppsU
     hdr.set_margin_end(12);
     hdr.set_margin_top(6);
     hdr.set_margin_bottom(6);
-    hdr.append(&col("Nama", 0, 0.0));
+    hdr.append(&col("Name", 0, 0.0));
     hdr.append(&col("PID", 56, 1.0));
     hdr.append(&col("CPU", 48, 1.0));
-    hdr.append(&col("Memori", 78, 1.0));
+    hdr.append(&col("Memory", 78, 1.0));
     hdr.append(&col("Swap", 66, 1.0));
     hdr.append(&col("Drive", 78, 1.0));
     hdr.append(&col("Port", 96, 1.0));
@@ -4418,8 +4418,8 @@ fn build_services_all_page() -> (adw::PreferencesPage, SvcAllUi) {
     let sel: Rc<RefCell<Option<(String, bool)>>> = Rc::new(RefCell::new(None));
     let filter: Rc<Cell<u8>> = Rc::new(Cell::new(0));
 
-    let g_head = adw::PreferencesGroup::builder().title("Semua Layanan").build();
-    let row_hdr = adw::ActionRow::builder().title("Layanan").subtitle("Memuat...").build();
+    let g_head = adw::PreferencesGroup::builder().title("All Services").build();
+    let row_hdr = adw::ActionRow::builder().title("Services").subtitle("Loading...").build();
     for (label, act) in [("Start", "start"), ("Stop", "stop"), ("Restart", "restart")] {
         let b = gtk::Button::builder().label(label).valign(gtk::Align::Center).build();
         if act == "stop" {
@@ -4439,9 +4439,9 @@ fn build_services_all_page() -> (adw::PreferencesPage, SvcAllUi) {
     let frow = adw::ActionRow::builder().title("Filter").build();
     let fbox = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     fbox.set_valign(gtk::Align::Center);
-    let b_all = gtk::ToggleButton::with_label("Semua");
-    let b_run = gtk::ToggleButton::with_label("Berjalan");
-    let b_fail = gtk::ToggleButton::with_label("Gagal");
+    let b_all = gtk::ToggleButton::with_label("All");
+    let b_run = gtk::ToggleButton::with_label("Running");
+    let b_fail = gtk::ToggleButton::with_label("Failed");
     b_run.set_group(Some(&b_all));
     b_fail.set_group(Some(&b_all));
     b_all.set_active(true);
@@ -4532,35 +4532,35 @@ fn build_ui(app: &adw::Application) {
 
     // ── Apps / Processes page ──
     let (apps_page, apps_ui) = build_apps_page(&shared);
-    stack.add_titled(&apps_page, Some("apps"), "Aplikasi");
+    stack.add_titled(&apps_page, Some("apps"), "Applications");
 
     // ── Full Services page ──
     let (svc_all_page, svc_all_ui) = build_services_all_page();
-    stack.add_titled(&svc_all_page, Some("svcall"), "Semua Layanan");
+    stack.add_titled(&svc_all_page, Some("svcall"), "All Services");
 
     // ── Power page ──
     let power_page = adw::PreferencesPage::new();
 
-    let g_bat = adw::PreferencesGroup::builder().title("Status Baterai &amp; Daya").build();
-    let row_bat = adw::ActionRow::builder().title("Baterai: --%").subtitle("Memuat...").build();
+    let g_bat = adw::PreferencesGroup::builder().title("Battery &amp; Power Status").build();
+    let row_bat = adw::ActionRow::builder().title("Battery: --%").subtitle("Loading...").build();
     let bat_bar = gtk::LevelBar::builder().min_value(0.0).max_value(100.0).valign(gtk::Align::Center).build();
     bat_bar.set_size_request(110, 16);
     row_bat.add_suffix(&bat_bar);
     g_bat.add(&row_bat);
-    let row_drain = adw::ActionRow::builder().title("Sumber Daya &amp; Watt").subtitle("Memuat...").build();
+    let row_drain = adw::ActionRow::builder().title("Power Source &amp; Watts").subtitle("Loading...").build();
     g_bat.add(&row_drain);
-    let row_health = adw::ActionRow::builder().title("Kesehatan Baterai (Pabrik)").subtitle("Memuat...").build();
+    let row_health = adw::ActionRow::builder().title("Battery Health (Factory)").subtitle("Loading...").build();
     g_bat.add(&row_health);
     power_page.add(&g_bat);
 
     // GPU
     let g_gpu = adw::PreferencesGroup::builder()
-        .title("Manajemen &amp; Mode GPU")
+        .title("GPU Management &amp; Mode")
         .description("AMD Vega iGPU ↔ NVIDIA GTX 1660 Ti dGPU")
         .build();
-    let row_gpu_tel = adw::ActionRow::builder().title("Status GPU NVIDIA").subtitle("Memuat telemetri...").build();
+    let row_gpu_tel = adw::ActionRow::builder().title("Status GPU NVIDIA").subtitle("Loading telemetry...").build();
     g_gpu.add(&row_gpu_tel);
-    let row_gpu_mode = adw::ActionRow::builder().title("Pilihan Mode Grafis").subtitle("Mode: Hybrid").build();
+    let row_gpu_mode = adw::ActionRow::builder().title("Graphics Mode Selection").subtitle("Mode: Hybrid").build();
     let box_gpu = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     box_gpu.set_valign(gtk::Align::Center);
     let btn_gpu = [seg_button("Hybrid"), seg_button("AMD Only"), seg_button("NVIDIA")];
@@ -4576,13 +4576,13 @@ fn build_ui(app: &adw::Application) {
 
     // CPU power modes
     let g_mode = adw::PreferencesGroup::builder()
-        .title("Kontrol Mode Performa &amp; Daya")
-        .description("Biru = aktif")
+        .title("Performance &amp; Power Mode Control")
+        .description("Blue = active")
         .build();
-    let row_mode = adw::ActionRow::builder().title("Profil Performa CPU").subtitle("Powersave / Performance / Auto").build();
+    let row_mode = adw::ActionRow::builder().title("CPU Performance Profile").subtitle("Powersave / Performance / Auto").build();
     let box_mode = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     box_mode.set_valign(gtk::Align::Center);
-    let btn_mode = [seg_button("Hemat"), seg_button("Performa"), seg_button("Auto")];
+    let btn_mode = [seg_button("Saver"), seg_button("Performance"), seg_button("Auto")];
     let mode_scripts = ["battery-save.sh", "battery-on-ac.sh", "battery-udev-handler.sh"];
     for (i, b) in btn_mode.iter().enumerate() {
         let sc = mode_scripts[i].to_string();
@@ -4594,13 +4594,13 @@ fn build_ui(app: &adw::Application) {
     power_page.add(&g_mode);
 
     // Fan
-    let g_fan = adw::PreferencesGroup::builder().title("Kontrol Kipas &amp; Pendingin (Dual Fan)").build();
-    let row_fan_rpm = adw::ActionRow::builder().title("Kecepatan Putaran Kipas").subtitle("CPU Fan: -- RPM | GPU Fan: -- RPM").build();
+    let g_fan = adw::PreferencesGroup::builder().title("Fan &amp; Cooling Control (Dual Fan)").build();
+    let row_fan_rpm = adw::ActionRow::builder().title("Fan Rotation Speed").subtitle("CPU Fan: -- RPM | GPU Fan: -- RPM").build();
     g_fan.add(&row_fan_rpm);
-    let row_fan_ctrl = adw::ActionRow::builder().title("Profil Kecepatan Kipas").subtitle("Mode: Normal").build();
+    let row_fan_ctrl = adw::ActionRow::builder().title("Fan Speed Profile").subtitle("Mode: Normal").build();
     let box_fan = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     box_fan.set_valign(gtk::Align::Center);
-    let btn_fan = [seg_button("Hening"), seg_button("Normal"), seg_button("Turbo")];
+    let btn_fan = [seg_button("Silent"), seg_button("Normal"), seg_button("Turbo")];
     let fan_args = ["2", "0", "1"]; // silent, normal, turbo
     for (i, b) in btn_fan.iter().enumerate() {
         let arg = fan_args[i].to_string();
@@ -4614,24 +4614,24 @@ fn build_ui(app: &adw::Application) {
     // Hardware / server
     let g_hw = adw::PreferencesGroup::builder().title("Fitur Hardware &amp; Server").build();
     let switch_threshold = adw::SwitchRow::builder()
-        .title("Batas Cas Baterai 80% (Battery Health)")
-        .subtitle("Membatasi pengisian di 80% untuk melindungi sel")
+        .title("Battery Charge Limit 80% (Battery Health)")
+        .subtitle("Limits charging at 80% to protect the cells")
         .build();
     g_hw.add(&switch_threshold);
     let row_clamshell = adw::ActionRow::builder()
-        .title("Mode Tutup Layar (Clamshell Server)")
-        .subtitle("Layar mati saat ditutup, CPU &amp; agent tetap jalan")
+        .title("Lid-Close Mode (Clamshell Server)")
+        .subtitle("Screen off when closed, CPU &amp; agent keep running")
         .build();
-    let lbl_cs = gtk::Label::new(Some("Aktif"));
+    let lbl_cs = gtk::Label::new(Some("Active"));
     lbl_cs.add_css_class("success");
     lbl_cs.set_valign(gtk::Align::Center);
     row_clamshell.add_suffix(&lbl_cs);
     g_hw.add(&row_clamshell);
-    let row_cpu_mon = adw::ActionRow::builder().title("CPU Monitor Real-time").subtitle("Memuat frekuensi...").build();
+    let row_cpu_mon = adw::ActionRow::builder().title("CPU Monitor Real-time").subtitle("Loading frequency...").build();
     g_hw.add(&row_cpu_mon);
     power_page.add(&g_hw);
 
-    let pp = stack.add_titled(&power_page, Some("power"), "Daya & Baterai");
+    let pp = stack.add_titled(&power_page, Some("power"), "Power & Battery");
     pp.set_icon_name(Some("battery-symbolic"));
 
     // ── Keyboard RGB page ──
@@ -4650,7 +4650,7 @@ fn build_ui(app: &adw::Application) {
         .title("Logitech G304 Lightspeed Wireless")
         .description("Receiver USB 046d:C53F • Protocol HID++ 4.2")
         .build();
-    let row_m_bat = adw::ActionRow::builder().title("Baterai Mouse G304: --%").subtitle("Memuat...").build();
+    let row_m_bat = adw::ActionRow::builder().title("G304 Mouse Battery: --%").subtitle("Loading...").build();
     let m_bat_bar = gtk::LevelBar::builder().min_value(0.0).max_value(100.0).valign(gtk::Align::Center).build();
     m_bat_bar.set_size_request(110, 16);
     row_m_bat.add_suffix(&m_bat_bar);
@@ -4659,10 +4659,10 @@ fn build_ui(app: &adw::Application) {
 
     // Polling rate
     let g_hz = adw::PreferencesGroup::builder()
-        .title("Polling Rate (Frekuensi Transfer Data Hz)")
-        .description("Semakin tinggi semakin responsif")
+        .title("Polling Rate (Data Transfer Frequency Hz)")
+        .description("Higher is more responsive")
         .build();
-    let row_m_hz = adw::ActionRow::builder().title("Kecepatan Polling Rate saat Ini").subtitle("Memuat...").build();
+    let row_m_hz = adw::ActionRow::builder().title("Current Polling Rate").subtitle("Loading...").build();
     let box_hz = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     box_hz.set_valign(gtk::Align::Center);
     let mut hz_btns: Vec<(u32, gtk::Button)> = Vec::new();
@@ -4681,8 +4681,8 @@ fn build_ui(app: &adw::Application) {
     mouse_page.add(&g_hz);
 
     // DPI
-    let g_dpi = adw::PreferencesGroup::builder().title("Sensitivitas Sensor Optik (DPI)").build();
-    let row_m_dpi = adw::ActionRow::builder().title("Nilai DPI Saat Ini").subtitle("-- DPI").build();
+    let g_dpi = adw::PreferencesGroup::builder().title("Optical Sensor Sensitivity (DPI)").build();
+    let row_m_dpi = adw::ActionRow::builder().title("Current DPI Value").subtitle("-- DPI").build();
     let scale_dpi = gtk::Scale::with_range(gtk::Orientation::Horizontal, 200.0, 12000.0, 50.0);
     scale_dpi.set_size_request(180, -1);
     scale_dpi.set_valign(gtk::Align::Center);
@@ -4710,7 +4710,7 @@ fn build_ui(app: &adw::Application) {
     }
     row_m_dpi.add_suffix(&scale_dpi);
     g_dpi.add(&row_m_dpi);
-    let row_dpi_presets = adw::ActionRow::builder().title("Preset DPI Populer").subtitle("Klik untuk ubah sensitivitas seketika").build();
+    let row_dpi_presets = adw::ActionRow::builder().title("Popular DPI Presets").subtitle("Click to change sensitivity instantly").build();
     let box_dpi = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     box_dpi.set_valign(gtk::Align::Center);
     for dpi in [400u32, 800, 1200, 1600, 3200] {
@@ -4732,10 +4732,10 @@ fn build_ui(app: &adw::Application) {
     mouse_page.add(&g_dpi);
 
     // Onboard + USB
-    let g_ob = adw::PreferencesGroup::builder().title("Profil Onboard Memory & Anti-Lag USB".replace('&', "&amp;").as_str()).build();
+    let g_ob = adw::PreferencesGroup::builder().title("Onboard Memory Profile & USB Anti-Lag".replace('&', "&amp;").as_str()).build();
     let switch_onboard = adw::SwitchRow::builder()
-        .title("Profil Onboard Memory (EEPROM)")
-        .subtitle("Gunakan profil tersimpan di memori fisik mouse G304")
+        .title("Onboard Memory Profile (EEPROM)")
+        .subtitle("Use the profile stored in the G304 mouse's physical memory")
         .build();
     {
         let st = m_sync.clone();
@@ -4749,10 +4749,10 @@ fn build_ui(app: &adw::Application) {
     }
     g_ob.add(&switch_onboard);
     let row_usb = adw::ActionRow::builder()
-        .title("Proteksi USB Autosuspend (Anti Micro-Stutter)")
-        .subtitle("Receiver G304 dikunci di mode Power ON (Bebas Lag)")
+        .title("USB Autosuspend Protection (Anti Micro-Stutter)")
+        .subtitle("G304 receiver locked in Power ON mode (Lag-free)")
         .build();
-    let lbl_usb = gtk::Label::new(Some("Aktif"));
+    let lbl_usb = gtk::Label::new(Some("Active"));
     lbl_usb.add_css_class("success");
     lbl_usb.set_valign(gtk::Align::Center);
     row_usb.add_suffix(&lbl_usb);
@@ -4770,7 +4770,7 @@ fn build_ui(app: &adw::Application) {
         &window,
         &USER_SVC,
         true,
-        "Layanan AI &amp; Pengguna (User Daemons)",
+        "AI &amp; User Services (User Daemons)",
         &mut svc_widgets,
     ));
     services_page.add(&build_svc_group(
@@ -4778,10 +4778,10 @@ fn build_ui(app: &adw::Application) {
         &window,
         &SYS_SVC,
         false,
-        "Layanan Infrastruktur Sistem (Root)",
+        "System Infrastructure Services (Root)",
         &mut svc_widgets,
     ));
-    let svp = stack.add_titled(&services_page, Some("services"), "Layanan Sistem");
+    let svp = stack.add_titled(&services_page, Some("services"), "System Services");
     svp.set_icon_name(Some("emblem-system-symbolic"));
 
     // ── Left sidebar (adaptive AdwNavigationSplitView, Mission Center style) ──
@@ -4790,12 +4790,12 @@ fn build_ui(app: &adw::Application) {
     sidebar.set_selection_mode(gtk::SelectionMode::Single);
     sidebar.append(&sidebar_row("cpu", "CPU", "lucide-cpu"));
     sidebar.append(&sidebar_row("memory", "Memory", "lucide-memory-stick"));
-    sidebar.append(&sidebar_row("power", "Daya & Baterai", "lucide-battery-charging"));
+    sidebar.append(&sidebar_row("power", "Power & Battery", "lucide-battery-charging"));
     sidebar.append(&sidebar_row("rgb", "Keyboard RGB", "lucide-keyboard"));
     sidebar.append(&sidebar_row("mouse", "Mouse Logitech", "lucide-mouse"));
-    sidebar.append(&sidebar_row("services", "Layanan Sistem", "lucide-server"));
-    sidebar.append(&sidebar_row("apps", "Aplikasi & Proses", "lucide-apps"));
-    sidebar.append(&sidebar_row("svcall", "Semua Layanan", "lucide-server"));
+    sidebar.append(&sidebar_row("services", "System Services", "lucide-server"));
+    sidebar.append(&sidebar_row("apps", "Applications & Processes", "lucide-apps"));
+    sidebar.append(&sidebar_row("svcall", "All Services", "lucide-server"));
 
     // Section headers rendered above rows via the header func — this adds no
     // selectable rows, so the absolute index math in rebuild_dynamic (which
