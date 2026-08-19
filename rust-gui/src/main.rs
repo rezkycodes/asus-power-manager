@@ -446,9 +446,10 @@ fn lsblk_kv(line: &str) -> std::collections::HashMap<String, String> {
     m
 }
 
-// Enumerate physical drives + partitions once (design mirrors Mission Center's
-// Disk view; data comes from lsblk + /proc/diskstats — no GPL code reused).
-fn gather_drives_static(sh: &Arc<Mutex<Shared>>) {
+// Enumerate physical drives + partitions (design mirrors Mission Center's Disk
+// view; data comes from lsblk + /proc/diskstats — no GPL code reused).
+// Pure: returns a fresh list with graph history initialized, no shared lock.
+fn enumerate_drives() -> Vec<DriveInfo> {
     let root_disk = Command::new("findmnt")
         .args(["-n", "-o", "SOURCE", "/"])
         .output()
@@ -474,7 +475,7 @@ fn gather_drives_static(sh: &Arc<Mutex<Shared>>) {
         .output()
     {
         Ok(o) => o,
-        Err(_) => return,
+        Err(_) => return Vec::new(),
     };
     let text = String::from_utf8_lossy(&out.stdout);
     let mut drives: Vec<DriveInfo> = Vec::new();
@@ -533,12 +534,66 @@ fn gather_drives_static(sh: &Arc<Mutex<Shared>>) {
             }
         }
     }
+    drives.sort_by(|a, b| a.dev.cmp(&b.dev));
+    drives
+}
+
+// Startup: populate the drive list once.
+fn gather_drives_static(sh: &Arc<Mutex<Shared>>) {
+    let drives = enumerate_drives();
     if let Ok(mut g) = sh.lock() {
         g.drives = drives;
     }
 }
 
-// Per-tick I/O sampling from /proc/diskstats (sector = 512 B by convention).
+// Structural signature of the drive set (dev + partition names). Changes only
+// when a disk or partition is added/removed — used to trigger a UI rebuild.
+fn drive_signature(drives: &[DriveInfo]) -> String {
+    let mut s = String::new();
+    for d in drives {
+        s.push_str(&d.dev);
+        s.push('|');
+        for p in &d.partitions {
+            s.push_str(&p.name);
+            s.push(',');
+        }
+        s.push(';');
+    }
+    s
+}
+
+// Periodic hotplug re-scan: merge a fresh enumeration into the shared list,
+// preserving each surviving drive's live counters/history so graphs don't reset.
+fn refresh_drive_list(sh: &Arc<Mutex<Shared>>) {
+    let fresh = enumerate_drives();
+    if let Ok(mut g) = sh.lock() {
+        let mut old: std::collections::HashMap<String, DriveInfo> =
+            g.drives.drain(..).map(|d| (d.dev.clone(), d)).collect();
+        let mut merged = Vec::with_capacity(fresh.len());
+        for mut f in fresh {
+            if let Some(o) = old.remove(&f.dev) {
+                f.active_hist = o.active_hist;
+                f.thru_hist = o.thru_hist;
+                f.prev = o.prev;
+                f.read_bps = o.read_bps;
+                f.write_bps = o.write_bps;
+                f.total_read = o.total_read;
+                f.total_written = o.total_written;
+                f.active_pct = o.active_pct;
+                f.resp_ms = o.resp_ms;
+                for p in f.partitions.iter_mut() {
+                    if p.used == 0 {
+                        if let Some(op) = o.partitions.iter().find(|x| x.name == p.name) {
+                            p.used = op.used;
+                        }
+                    }
+                }
+            }
+            merged.push(f);
+        }
+        g.drives = merged;
+    }
+}
 fn sample_diskstats(sh: &Arc<Mutex<Shared>>) {
     let content = match fs::read_to_string("/proc/diskstats") {
         Ok(c) => c,
@@ -836,6 +891,7 @@ fn spawn_sampler(sh: Arc<Mutex<Shared>>) {
             }
             sample_diskstats(&sh);
             if tick % 3 == 0 {
+                refresh_drive_list(&sh);
                 refresh_part_usage(&sh);
             }
             tick += 1;
@@ -1016,7 +1072,14 @@ struct Ui {
     mem_area: gtk::DrawingArea,
     swap_area: gtk::DrawingArea,
     mem_lbl: std::collections::HashMap<&'static str, gtk::Label>,
-    drives: Vec<DriveUi>,
+    drives: RefCell<Vec<DriveUi>>,
+    // hotplug rebuild handles
+    shared: Arc<Mutex<Shared>>,
+    stack: adw::ViewStack,
+    sidebar: gtk::ListBox,
+    drive_rows: RefCell<Vec<gtk::ListBoxRow>>,
+    drive_pages: RefCell<Vec<adw::PreferencesPage>>,
+    drive_sig: RefCell<String>,
 }
 
 impl Ui {
@@ -1268,8 +1331,13 @@ impl Ui {
         self.mem_area.queue_draw();
         self.swap_area.queue_draw();
 
-        // ── Drives ──
-        for du in &self.drives {
+        // ── Drives (rebuild sidebar/pages on hotplug, then update values) ──
+        let sig = drive_signature(&g.drives);
+        if *self.drive_sig.borrow() != sig {
+            self.rebuild_drives(&g.drives);
+            *self.drive_sig.borrow_mut() = sig;
+        }
+        for du in self.drives.borrow().iter() {
             if let Some(d) = g.drives.get(du.idx) {
                 let dset = |k: &str, v: String| {
                     if let Some(l) = du.lbl.get(k) {
@@ -1298,6 +1366,40 @@ impl Ui {
                 }
                 du.active_area.queue_draw();
                 du.thru_area.queue_draw();
+            }
+        }
+    }
+
+    // Rebuild the per-drive sidebar rows and stack pages after a hotplug change.
+    // Drive rows live between Memory (index 1) and Power, i.e. starting at index 2.
+    fn rebuild_drives(&self, drives: &[DriveInfo]) {
+        for r in self.drive_rows.borrow().iter() {
+            self.sidebar.remove(r);
+        }
+        self.drive_rows.borrow_mut().clear();
+        for p in self.drive_pages.borrow().iter() {
+            self.stack.remove(p);
+        }
+        self.drive_pages.borrow_mut().clear();
+        self.drives.borrow_mut().clear();
+
+        for (i, info) in drives.iter().enumerate() {
+            let (page, du) = build_drive_page(&self.shared, i, info);
+            self.stack.add_titled(&page, Some(&format!("drive{i}")), &format!("Drive {i}"));
+            let row = sidebar_row(
+                &format!("drive{i}"),
+                &format!("{} {} ({})", info.kind, i, info.dev),
+                "lucide-hard-drive",
+            );
+            self.sidebar.insert(&row, (2 + i) as i32);
+            self.drive_rows.borrow_mut().push(row);
+            self.drive_pages.borrow_mut().push(page);
+            self.drives.borrow_mut().push(du);
+        }
+        // If the previously selected row was removed, fall back to the first tab.
+        if self.sidebar.selected_row().is_none() {
+            if let Some(first) = self.sidebar.row_at_index(0) {
+                self.sidebar.select_row(Some(&first));
             }
         }
     }
@@ -2329,6 +2431,24 @@ fn build_drive_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &DriveInfo) -
     (page, du)
 }
 
+// Build a single sidebar navigation row (Lucide icon + label).
+fn sidebar_row(name: &str, label: &str, icon: &str) -> gtk::ListBoxRow {
+    let row = gtk::ListBoxRow::new();
+    row.set_widget_name(name);
+    let bx = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    bx.set_margin_top(10);
+    bx.set_margin_bottom(10);
+    bx.set_margin_start(10);
+    bx.set_margin_end(10);
+    let img = lucide(icon, 22);
+    let lbl = gtk::Label::new(Some(label));
+    lbl.set_xalign(0.0);
+    bx.append(&img);
+    bx.append(&lbl);
+    row.set_child(Some(&bx));
+    row
+}
+
 fn build_ui(app: &adw::Application) {
     // Force full-dark scheme regardless of the system theme.
     adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
@@ -2372,6 +2492,7 @@ fn build_ui(app: &adw::Application) {
     // ── Drive pages (after Memory, one per physical disk) ──
     let drive_snapshot: Vec<DriveInfo> = shared.lock().map(|g| g.drives.clone()).unwrap_or_default();
     let mut drive_uis: Vec<DriveUi> = Vec::new();
+    let mut drive_pages_vec: Vec<adw::PreferencesPage> = Vec::new();
     let mut drive_tabs: Vec<(String, String)> = Vec::new(); // (stack name, sidebar label)
     for (i, info) in drive_snapshot.iter().enumerate() {
         let (dpage, du) = build_drive_page(&shared, i, info);
@@ -2380,6 +2501,7 @@ fn build_ui(app: &adw::Application) {
         dp.set_icon_name(Some("drive-harddisk-symbolic"));
         drive_tabs.push((sname, format!("{} {} ({})", info.kind, i, info.dev)));
         drive_uis.push(du);
+        drive_pages_vec.push(dpage);
     }
 
     // ── Power page ──
@@ -2632,35 +2754,18 @@ fn build_ui(app: &adw::Application) {
     let sidebar = gtk::ListBox::new();
     sidebar.add_css_class("navigation-sidebar");
     sidebar.set_selection_mode(gtk::SelectionMode::Single);
-    let mut tabs: Vec<(String, String, String)> = vec![
-        ("cpu".into(), "CPU".into(), "lucide-cpu".into()),
-        ("memory".into(), "Memory".into(), "lucide-memory-stick".into()),
-    ];
+    sidebar.append(&sidebar_row("cpu", "CPU", "lucide-cpu"));
+    sidebar.append(&sidebar_row("memory", "Memory", "lucide-memory-stick"));
+    let mut drive_rows_vec: Vec<gtk::ListBoxRow> = Vec::new();
     for (sname, label) in &drive_tabs {
-        tabs.push((sname.clone(), label.clone(), "lucide-hard-drive".into()));
-    }
-    tabs.extend([
-        ("power".to_string(), "Daya & Baterai".to_string(), "lucide-battery-charging".to_string()),
-        ("rgb".to_string(), "Keyboard RGB".to_string(), "lucide-keyboard".to_string()),
-        ("mouse".to_string(), "Mouse Logitech".to_string(), "lucide-mouse".to_string()),
-        ("services".to_string(), "Layanan Sistem".to_string(), "lucide-server".to_string()),
-    ]);
-    for (name, label, icon) in &tabs {
-        let row = gtk::ListBoxRow::new();
-        row.set_widget_name(name);
-        let bx = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        bx.set_margin_top(10);
-        bx.set_margin_bottom(10);
-        bx.set_margin_start(10);
-        bx.set_margin_end(10);
-        let img = lucide(icon, 22);
-        let lbl = gtk::Label::new(Some(label));
-        lbl.set_xalign(0.0);
-        bx.append(&img);
-        bx.append(&lbl);
-        row.set_child(Some(&bx));
+        let row = sidebar_row(sname, label, "lucide-hard-drive");
         sidebar.append(&row);
+        drive_rows_vec.push(row);
     }
+    sidebar.append(&sidebar_row("power", "Daya & Baterai", "lucide-battery-charging"));
+    sidebar.append(&sidebar_row("rgb", "Keyboard RGB", "lucide-keyboard"));
+    sidebar.append(&sidebar_row("mouse", "Mouse Logitech", "lucide-mouse"));
+    sidebar.append(&sidebar_row("services", "Layanan Sistem", "lucide-server"));
     {
         let stack = stack.clone();
         sidebar.connect_row_selected(move |_lb, row| {
@@ -2756,7 +2861,13 @@ fn build_ui(app: &adw::Application) {
         mem_area,
         swap_area,
         mem_lbl,
-        drives: drive_uis,
+        drives: RefCell::new(drive_uis),
+        shared: shared.clone(),
+        stack: stack.clone(),
+        sidebar: sidebar.clone(),
+        drive_rows: RefCell::new(drive_rows_vec),
+        drive_pages: RefCell::new(drive_pages_vec),
+        drive_sig: RefCell::new(drive_signature(&drive_snapshot)),
     });
 
     let sh = shared.clone();
