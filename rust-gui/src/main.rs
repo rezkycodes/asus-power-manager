@@ -2376,6 +2376,11 @@ fn build_drive_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &DriveInfo) -
     let g_det = adw::PreferencesGroup::builder().title("Detail").build();
     let det = |t: &str, v: &str, gr: &adw::PreferencesGroup| {
         let l = info_row(t, gr);
+        // Long IDs (e.g. WWN) must not steal the row width and wrap the title.
+        // Middle-ellipsize like Mission Center; selectable keeps the full value.
+        l.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+        l.set_max_width_chars(28);
+        l.set_selectable(true);
         l.set_text(v);
     };
     det("Kapasitas", &fmt_bytes(info.capacity), &g_det);
