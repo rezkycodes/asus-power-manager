@@ -2368,6 +2368,8 @@ struct Ui {
     m_sync: Rc<Cell<bool>>,
     m_pending_dpi: Rc<Cell<Option<(u32, Instant)>>>,
     m_pending_hz: Rc<Cell<Option<(u32, Instant)>>>,
+    m_pending_led_mode: Rc<Cell<Option<(u32, Instant)>>>,
+    m_pending_led_color: Rc<Cell<Option<((u8, u8, u8), Instant)>>>,
     row_m_led_prev: adw::ActionRow,
     m_led_swatch: gtk::DrawingArea,
     m_led_btns: Vec<(u32, gtk::Button)>,
@@ -2588,9 +2590,28 @@ impl Ui {
             self.m_sync.set(false);
         }
 
-        // Mouse LED
-        let m_mode: u32 = g.m_led_mode.parse().unwrap_or(1);
-        let (mr, mg, mb) = parse_hex_color(&g.m_led_color);
+        // Mouse LED (honor pending state to eliminate race condition / flicker)
+        let mut m_mode: u32 = g.m_led_mode.parse().unwrap_or(1);
+        if let Some((p, ts)) = self.m_pending_led_mode.get() {
+            if m_mode == p {
+                self.m_pending_led_mode.set(None);
+            } else if ts.elapsed().as_secs() < 6 {
+                m_mode = p;
+            } else {
+                self.m_pending_led_mode.set(None);
+            }
+        }
+        let mut color_rgb = parse_hex_color(&g.m_led_color);
+        if let Some((p, ts)) = self.m_pending_led_color.get() {
+            if color_rgb == p {
+                self.m_pending_led_color.set(None);
+            } else if ts.elapsed().as_secs() < 6 {
+                color_rgb = p;
+            } else {
+                self.m_pending_led_color.set(None);
+            }
+        }
+        let (mr, mg, mb) = color_rgb;
         let m_int: u32 = g.m_led_intensity.parse().unwrap_or(100);
         let m_per: u32 = g.m_led_period.parse().unwrap_or(3000);
         let m_mode_label = mouse_led_mode_name(m_mode);
@@ -5840,6 +5861,8 @@ fn build_ui(app: &adw::Application) {
     let m_sync = Rc::new(Cell::new(false));
     let m_pending_dpi: Rc<Cell<Option<(u32, Instant)>>> = Rc::new(Cell::new(None));
     let m_pending_hz: Rc<Cell<Option<(u32, Instant)>>> = Rc::new(Cell::new(None));
+    let m_pending_led_mode: Rc<Cell<Option<(u32, Instant)>>> = Rc::new(Cell::new(None));
+    let m_pending_led_color: Rc<Cell<Option<((u8, u8, u8), Instant)>>> = Rc::new(Cell::new(None));
     let m_debounce: Rc<Cell<Option<glib::SourceId>>> = Rc::new(Cell::new(None));
     let mouse_page = adw::PreferencesPage::new();
 
@@ -6047,12 +6070,14 @@ fn build_ui(app: &adw::Application) {
     for (mode_id, mode_lbl) in m_mode_choices {
         let b = seg_button(mode_lbl);
         let st = m_led_st.clone();
-        let apply = apply_m_led.clone();
+        let sch = schedule_m_led.clone();
         let ref_prev = refresh_m_led_prev.clone();
+        let pend_m = m_pending_led_mode.clone();
         b.connect_clicked(move |_| {
             st.borrow_mut().mode = mode_id;
+            pend_m.set(Some((mode_id, Instant::now())));
             ref_prev();
-            apply();
+            sch();
         });
         box_m_led_mode.append(&b);
         m_led_btns.push((mode_id, b));
@@ -6091,8 +6116,10 @@ fn build_ui(app: &adw::Application) {
         });
         btn.set_child(Some(&circle));
         let st = m_led_st.clone();
-        let apply = apply_m_led.clone();
+        let sch = schedule_m_led.clone();
         let ref_prev = refresh_m_led_prev.clone();
+        let pend_c = m_pending_led_color.clone();
+        let pend_m = m_pending_led_mode.clone();
         btn.connect_clicked(move |_| {
             {
                 let mut s = st.borrow_mut();
@@ -6101,10 +6128,12 @@ fn build_ui(app: &adw::Application) {
                 s.b = pb;
                 if s.mode == 0 {
                     s.mode = 1;
+                    pend_m.set(Some((1, Instant::now())));
                 }
             }
+            pend_c.set(Some(((pr, pg, pb), Instant::now())));
             ref_prev();
-            apply();
+            sch();
         });
         card_m_swatches.append(&btn);
     }
@@ -6127,21 +6156,28 @@ fn build_ui(app: &adw::Application) {
     }
     {
         let st = m_led_st.clone();
-        let apply = apply_m_led.clone();
+        let sch = schedule_m_led.clone();
         let ref_prev = refresh_m_led_prev.clone();
+        let pend_c = m_pending_led_color.clone();
+        let pend_m = m_pending_led_mode.clone();
         m_color_btn.connect_rgba_notify(move |btn| {
             let rgba = btn.rgba();
+            let cr = (rgba.red() * 255.0).round() as u8;
+            let cg = (rgba.green() * 255.0).round() as u8;
+            let cb = (rgba.blue() * 255.0).round() as u8;
             {
                 let mut s = st.borrow_mut();
-                s.r = (rgba.red() * 255.0).round() as u8;
-                s.g = (rgba.green() * 255.0).round() as u8;
-                s.b = (rgba.blue() * 255.0).round() as u8;
+                s.r = cr;
+                s.g = cg;
+                s.b = cb;
                 if s.mode == 0 {
                     s.mode = 1;
+                    pend_m.set(Some((1, Instant::now())));
                 }
             }
+            pend_c.set(Some(((cr, cg, cb), Instant::now())));
             ref_prev();
-            apply();
+            sch();
         });
     }
     row_m_color.add_suffix(&m_color_btn);
@@ -6454,6 +6490,8 @@ fn build_ui(app: &adw::Application) {
         m_sync,
         m_pending_dpi,
         m_pending_hz,
+        m_pending_led_mode,
+        m_pending_led_color,
         row_m_led_prev,
         m_led_swatch,
         m_led_btns,

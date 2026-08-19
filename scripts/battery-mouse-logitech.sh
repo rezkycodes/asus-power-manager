@@ -98,14 +98,7 @@ case "$ACTION" in
         elif [[ "$PARAM" == "250" || "$PARAM" == "4ms" ]]; then HZ_VAL="4ms"
         elif [[ "$PARAM" == "125" || "$PARAM" == "8ms" ]]; then HZ_VAL="8ms"
         fi
-        # Only disable onboard profiles if not already off (avoids a slow extra solaar call)
-        if [[ "$(get_cached ONBOARD off)" != "off" ]]; then
-            solaar config "$M_NAME" onboard_profiles Disabled >/dev/null 2>&1 || true
-            set_cached "ONBOARD" "off"
-        fi
-        solaar config "$M_NAME" report_rate "$HZ_VAL" >/dev/null 2>&1 || true
-        
-        # Save cache
+        # Save cache immediately
         HZ_NUM="1000"
         [[ "$HZ_VAL" == "2ms" ]] && HZ_NUM="500"
         [[ "$HZ_VAL" == "4ms" ]] && HZ_NUM="250"
@@ -113,20 +106,26 @@ case "$ACTION" in
         set_cached "HZ" "$HZ_NUM"
         set_cached "ONBOARD" "off"
         echo "HZ=$HZ_NUM"
+
+        # Only disable onboard profiles if not already off (avoids a slow extra solaar call)
+        if [[ "$(get_cached ONBOARD off)" != "off" ]]; then
+            solaar config "$M_NAME" onboard_profiles Disabled >/dev/null 2>&1 || true
+        fi
+        solaar config "$M_NAME" report_rate "$HZ_VAL" >/dev/null 2>&1 || true
         ;;
 
     dpi)
         DPI_VAL="${PARAM:-1600}"
+        # Save cache immediately
+        set_cached "DPI" "$DPI_VAL"
+        echo "DPI=$DPI_VAL"
+
         # Only disable onboard profiles if not already off (avoids a slow extra solaar call)
         if [[ "$(get_cached ONBOARD off)" != "off" ]]; then
             solaar config "$M_NAME" onboard_profiles Disabled >/dev/null 2>&1 || true
             set_cached "ONBOARD" "off"
         fi
         solaar config "$M_NAME" dpi "$DPI_VAL" >/dev/null 2>&1 || true
-        
-        # Save cache
-        set_cached "DPI" "$DPI_VAL"
-        echo "DPI=$DPI_VAL"
         ;;
 
     onboard)
@@ -136,11 +135,10 @@ case "$ACTION" in
             OB_VAL="Profile 1"
             OB_CACHE="on"
         fi
-        solaar config "$M_NAME" onboard_profiles "$OB_VAL" >/dev/null 2>&1 || true
-        
-        # Save cache
         set_cached "ONBOARD" "$OB_CACHE"
         echo "ONBOARD=$OB_CACHE"
+
+        solaar config "$M_NAME" onboard_profiles "$OB_VAL" >/dev/null 2>&1 || true
         ;;
 
     led|led-effect)
@@ -158,38 +156,36 @@ case "$ACTION" in
             COLOR="0x00c8ff"
         fi
 
-        # Make sure led_control is enabled in solaar
-        solaar config "$M_NAME" led_control on >/dev/null 2>&1 || true
+        # Update cache immediately so any status reads see the new desired state immediately
+        set_cached "LED_MODE" "$MODE"
+        set_cached "LED_COLOR" "$COLOR"
+        set_cached "LED_PERIOD" "$PERIOD"
+        set_cached "LED_INTENSITY" "$INTENSITY"
+        echo "LED_MODE=$MODE"
+        echo "LED_COLOR=$COLOR"
+        echo "LED_PERIOD=$PERIOD"
+        echo "LED_INTENSITY=$INTENSITY"
+
+        # Make sure led_control is enabled in solaar if not yet marked on
+        if [[ "$(get_cached "LED_CONTROL" "off")" != "on" ]]; then
+            solaar config "$M_NAME" led_control on >/dev/null 2>&1 || true
+            set_cached "LED_CONTROL" "on"
+        fi
 
         # Build YAML setting string for Solaar
         YAML_SET=""
         if [[ "$MODE" == "0" || "$MODE" == "off" || "$MODE" == "disabled" ]]; then
             YAML_SET="!LEDEffectSetting {ID: 0}"
-            MODE="0"
         elif [[ "$MODE" == "3" || "$MODE" == "cycle" ]]; then
             YAML_SET="!LEDEffectSetting {ID: 3, period: $PERIOD, intensity: $INTENSITY}"
-            MODE="3"
         elif [[ "$MODE" == "10" || "$MODE" == "breathe" || "$MODE" == "pulse" ]]; then
             YAML_SET="!LEDEffectSetting {ID: 10, color: $COLOR, period: $PERIOD, intensity: $INTENSITY}"
-            MODE="10"
         else
             # Default to static (ID: 1)
             YAML_SET="!LEDEffectSetting {ID: 1, color: $COLOR, intensity: $INTENSITY}"
-            MODE="1"
         fi
 
         solaar config "$M_NAME" led_zone_1 "$YAML_SET" >/dev/null 2>&1 || true
-
-        # Update cache
-        set_cached "LED_MODE" "$MODE"
-        set_cached "LED_COLOR" "$COLOR"
-        set_cached "LED_PERIOD" "$PERIOD"
-        set_cached "LED_INTENSITY" "$INTENSITY"
-
-        echo "LED_MODE=$MODE"
-        echo "LED_COLOR=$COLOR"
-        echo "LED_PERIOD=$PERIOD"
-        echo "LED_INTENSITY=$INTENSITY"
         ;;
 
     *)
