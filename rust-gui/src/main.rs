@@ -18,6 +18,50 @@ use std::time::Instant;
 
 const HISTORY: usize = 60;
 
+#[derive(Default, Clone)]
+struct PartInfo {
+    name: String,   // e.g. "nvme0n1p1"
+    fstype: String, // e.g. "btrfs"
+    mount: String,  // mountpoint or ""
+    used: u64,      // bytes (0 if unknown)
+    size: u64,      // bytes
+}
+
+#[derive(Default, Clone, Copy)]
+struct DiskPrev {
+    reads: u64,
+    sect_read: u64,
+    ms_read: u64,
+    writes: u64,
+    sect_written: u64,
+    ms_write: u64,
+    ms_io: u64,
+}
+
+#[derive(Default, Clone)]
+struct DriveInfo {
+    dev: String,       // "nvme0n1"
+    kind: String,      // "NVMe" / "SSD" / "HDD"
+    model: String,
+    serial: String,
+    wwn: String,
+    capacity: u64,     // bytes
+    formatted: u64,    // bytes (sum of partition sizes)
+    is_system: bool,
+    rotational: bool,
+    // live
+    read_bps: f64,
+    write_bps: f64,
+    total_read: u64,
+    total_written: u64,
+    active_pct: f64,
+    resp_ms: f64,
+    active_hist: VecDeque<f64>, // percent 0-100
+    thru_hist: VecDeque<f64>,   // bytes/s (read+write)
+    partitions: Vec<PartInfo>,
+    prev: Option<DiskPrev>,
+}
+
 #[derive(Default)]
 struct Shared {
     ready: bool,
@@ -85,6 +129,8 @@ struct Shared {
     dimm_form: String,
     dimm_speed: String,
     dimm_slots: String,
+    // ── Drives (per physical disk) ──
+    drives: Vec<DriveInfo>,
     // ── Systemd services (key "user:unit"/"sys:unit" -> state) ──
     services: std::collections::HashMap<String, String>,
 }
@@ -367,6 +413,218 @@ fn gather_static(sh: &Arc<Mutex<Shared>>, logical: usize) {
     }
 }
 
+// Parse one `lsblk -P` line (KEY="value" pairs) into a map.
+fn lsblk_kv(line: &str) -> std::collections::HashMap<String, String> {
+    let mut m = std::collections::HashMap::new();
+    let b = line.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        while i < b.len() && b[i] == b' ' {
+            i += 1;
+        }
+        let ks = i;
+        while i < b.len() && b[i] != b'=' {
+            i += 1;
+        }
+        if i >= b.len() {
+            break;
+        }
+        let key = line[ks..i].to_string();
+        i += 1;
+        if i >= b.len() || b[i] != b'"' {
+            break;
+        }
+        i += 1;
+        let vs = i;
+        while i < b.len() && b[i] != b'"' {
+            i += 1;
+        }
+        let val = line[vs..i.min(b.len())].to_string();
+        i += 1;
+        m.insert(key, val);
+    }
+    m
+}
+
+// Enumerate physical drives + partitions once (design mirrors Mission Center's
+// Disk view; data comes from lsblk + /proc/diskstats — no GPL code reused).
+fn gather_drives_static(sh: &Arc<Mutex<Shared>>) {
+    let root_disk = Command::new("findmnt")
+        .args(["-n", "-o", "SOURCE", "/"])
+        .output()
+        .ok()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .split('[')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        })
+        .filter(|s| !s.is_empty())
+        .and_then(|src| Command::new("lsblk").args(["-no", "PKNAME", &src]).output().ok())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+
+    let out = match Command::new("lsblk")
+        .args([
+            "-b", "-P", "-o",
+            "NAME,TYPE,MODEL,SERIAL,WWN,ROTA,SIZE,FSTYPE,MOUNTPOINT,FSUSED",
+        ])
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return,
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut drives: Vec<DriveInfo> = Vec::new();
+    for line in text.lines() {
+        let m = lsblk_kv(line);
+        let ty = m.get("TYPE").map(|s| s.as_str()).unwrap_or("");
+        let name = m.get("NAME").cloned().unwrap_or_default();
+        if ty == "disk" {
+            if name.starts_with("zram")
+                || name.starts_with("loop")
+                || name.starts_with("ram")
+                || name.starts_with("dm-")
+                || name.starts_with("md")
+                || name.starts_with("sr")
+            {
+                continue;
+            }
+            let rota = m.get("ROTA").map(|s| s == "1").unwrap_or(false);
+            let kind = if name.starts_with("nvme") {
+                "NVMe"
+            } else if rota {
+                "HDD"
+            } else {
+                "SSD"
+            };
+            let cap = m.get("SIZE").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            drives.push(DriveInfo {
+                dev: name.clone(),
+                kind: kind.to_string(),
+                model: m.get("MODEL").cloned().unwrap_or_default().trim().to_string(),
+                serial: m.get("SERIAL").cloned().unwrap_or_default(),
+                wwn: m.get("WWN").cloned().unwrap_or_default(),
+                capacity: cap,
+                formatted: 0,
+                is_system: !root_disk.is_empty() && name == root_disk,
+                rotational: rota,
+                active_hist: VecDeque::from(vec![0.0; HISTORY]),
+                thru_hist: VecDeque::from(vec![0.0; HISTORY]),
+                ..Default::default()
+            });
+        } else if ty == "part" {
+            if let Some(d) = drives.last_mut() {
+                if !name.starts_with(&d.dev) {
+                    continue;
+                }
+                let size = m.get("SIZE").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+                let used = m.get("FSUSED").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+                d.formatted += size;
+                d.partitions.push(PartInfo {
+                    name: name.clone(),
+                    fstype: m.get("FSTYPE").cloned().unwrap_or_default(),
+                    mount: m.get("MOUNTPOINT").cloned().unwrap_or_default(),
+                    used,
+                    size,
+                });
+            }
+        }
+    }
+    if let Ok(mut g) = sh.lock() {
+        g.drives = drives;
+    }
+}
+
+// Per-tick I/O sampling from /proc/diskstats (sector = 512 B by convention).
+fn sample_diskstats(sh: &Arc<Mutex<Shared>>) {
+    let content = match fs::read_to_string("/proc/diskstats") {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let mut map: std::collections::HashMap<String, [u64; 7]> = std::collections::HashMap::new();
+    for line in content.lines() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() < 13 {
+            continue;
+        }
+        let g = |i: usize| f.get(i).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+        // reads f3, sect_read f5, ms_read f6, writes f7, sect_written f9, ms_write f10, ms_io f12
+        map.insert(f[2].to_string(), [g(3), g(5), g(6), g(7), g(9), g(10), g(12)]);
+    }
+    if let Ok(mut guard) = sh.lock() {
+        for d in guard.drives.iter_mut() {
+            if let Some(c) = map.get(&d.dev) {
+                let cur = DiskPrev {
+                    reads: c[0],
+                    sect_read: c[1],
+                    ms_read: c[2],
+                    writes: c[3],
+                    sect_written: c[4],
+                    ms_write: c[5],
+                    ms_io: c[6],
+                };
+                d.total_read = cur.sect_read * 512;
+                d.total_written = cur.sect_written * 512;
+                if let Some(p) = d.prev {
+                    let dt = 1.0_f64; // loop interval (s)
+                    d.read_bps = cur.sect_read.saturating_sub(p.sect_read) as f64 * 512.0 / dt;
+                    d.write_bps = cur.sect_written.saturating_sub(p.sect_written) as f64 * 512.0 / dt;
+                    let dms_io = cur.ms_io.saturating_sub(p.ms_io) as f64;
+                    d.active_pct = (dms_io / (dt * 1000.0) * 100.0).clamp(0.0, 100.0);
+                    let dios = (cur.reads.saturating_sub(p.reads)
+                        + cur.writes.saturating_sub(p.writes)) as f64;
+                    let dms = (cur.ms_read.saturating_sub(p.ms_read)
+                        + cur.ms_write.saturating_sub(p.ms_write)) as f64;
+                    d.resp_ms = if dios > 0.0 { dms / dios } else { 0.0 };
+                    d.active_hist.push_back(d.active_pct);
+                    while d.active_hist.len() > HISTORY {
+                        d.active_hist.pop_front();
+                    }
+                    d.thru_hist.push_back(d.read_bps + d.write_bps);
+                    while d.thru_hist.len() > HISTORY {
+                        d.thru_hist.pop_front();
+                    }
+                }
+                d.prev = Some(cur);
+            }
+        }
+    }
+}
+
+// Refresh live partition usage (gated to every 3rd tick).
+fn refresh_part_usage(sh: &Arc<Mutex<Shared>>) {
+    let out = match Command::new("lsblk")
+        .args(["-b", "-P", "-o", "NAME,FSUSED"])
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return,
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut used: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    for line in text.lines() {
+        let m = lsblk_kv(line);
+        if let Some(n) = m.get("NAME") {
+            let u = m.get("FSUSED").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            used.insert(n.clone(), u);
+        }
+    }
+    if let Ok(mut g) = sh.lock() {
+        for d in g.drives.iter_mut() {
+            for p in d.partitions.iter_mut() {
+                if let Some(u) = used.get(&p.name) {
+                    if *u > 0 {
+                        p.used = *u;
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn spawn_sampler(sh: Arc<Mutex<Shared>>) {
     std::thread::spawn(move || {
         let logical = sh.lock().map(|g| g.logical).unwrap_or(1);
@@ -576,6 +834,10 @@ fn spawn_sampler(sh: Arc<Mutex<Shared>>) {
                 }
                 prev = Some((ov, per));
             }
+            sample_diskstats(&sh);
+            if tick % 3 == 0 {
+                refresh_part_usage(&sh);
+            }
             tick += 1;
             std::thread::sleep(Duration::from_secs(1));
         }
@@ -754,6 +1016,7 @@ struct Ui {
     mem_area: gtk::DrawingArea,
     swap_area: gtk::DrawingArea,
     mem_lbl: std::collections::HashMap<&'static str, gtk::Label>,
+    drives: Vec<DriveUi>,
 }
 
 impl Ui {
@@ -1004,6 +1267,39 @@ impl Ui {
         mset("dslots", g.dimm_slots.clone());
         self.mem_area.queue_draw();
         self.swap_area.queue_draw();
+
+        // ── Drives ──
+        for du in &self.drives {
+            if let Some(d) = g.drives.get(du.idx) {
+                let dset = |k: &str, v: String| {
+                    if let Some(l) = du.lbl.get(k) {
+                        l.set_text(&v);
+                    }
+                };
+                dset("rspeed", fmt_rate(d.read_bps));
+                dset("wspeed", fmt_rate(d.write_bps));
+                dset("tread", fmt_bytes(d.total_read));
+                dset("twrite", fmt_bytes(d.total_written));
+                dset("active", format!("{:.0}%", d.active_pct));
+                dset("resp", format!("{:.2} ms", d.resp_ms));
+                let mx = d.thru_hist.iter().cloned().fold(0.0_f64, f64::max);
+                du.thru_scale.set_text(&fmt_rate(mx));
+                for (i, (bar, lb)) in du.parts.iter().enumerate() {
+                    if let Some(p) = d.partitions.get(i) {
+                        if p.size > 0 && p.used > 0 {
+                            bar.set_visible(true);
+                            bar.set_value(p.used as f64 / p.size as f64 * 100.0);
+                            lb.set_text(&format!("{} / {}", fmt_bytes(p.used), fmt_bytes(p.size)));
+                        } else {
+                            bar.set_visible(false);
+                            lb.set_text(&fmt_bytes(p.size));
+                        }
+                    }
+                }
+                du.active_area.queue_draw();
+                du.thru_area.queue_draw();
+            }
+        }
     }
 }
 
@@ -1767,6 +2063,39 @@ fn fmt_gib(kb: f64) -> String {
     }
 }
 
+fn fmt_bytes(b: u64) -> String {
+    let x = b as f64;
+    let (t, g, m, k) = (
+        1024.0_f64.powi(4),
+        1024.0_f64.powi(3),
+        1024.0_f64.powi(2),
+        1024.0_f64,
+    );
+    if x >= t {
+        format!("{:.1} TiB", x / t)
+    } else if x >= g {
+        format!("{:.1} GiB", x / g)
+    } else if x >= m {
+        format!("{:.1} MiB", x / m)
+    } else if x >= k {
+        format!("{:.0} KiB", x / k)
+    } else {
+        format!("{} B", b)
+    }
+}
+
+fn fmt_rate(bps: f64) -> String {
+    let b = bps.max(0.0);
+    let (g, m) = (1024.0_f64.powi(3), 1024.0_f64.powi(2));
+    if b >= g {
+        format!("{:.1} GiB/s", b / g)
+    } else if b >= m {
+        format!("{:.1} MiB/s", b / m)
+    } else {
+        format!("{:.0} KiB/s", b / 1024.0)
+    }
+}
+
 fn lucide(name: &str, px: i32) -> gtk::Image {
     let home = std::env::var("HOME").unwrap_or_default();
     let cands = [
@@ -1863,6 +2192,143 @@ fn build_memory_page(shared: &Arc<Mutex<Shared>>) -> MemPage {
     (page, row_mem, mem_bar, mem_area, swap_area, mem_lbl)
 }
 
+struct DriveUi {
+    idx: usize,
+    active_area: gtk::DrawingArea,
+    thru_area: gtk::DrawingArea,
+    thru_scale: gtk::Label,
+    lbl: std::collections::HashMap<&'static str, gtk::Label>,
+    parts: Vec<(gtk::LevelBar, gtk::Label)>,
+}
+
+// Build one drive detail page (mirrors Mission Center's Disk view layout using
+// this app's card style: Active-time + Throughput graphs, stats, details,
+// partitions with usage bars).
+fn build_drive_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &DriveInfo) -> (adw::PreferencesPage, DriveUi) {
+    let page = adw::PreferencesPage::new();
+
+    let g_head = adw::PreferencesGroup::builder()
+        .title(format!("Drive {} ({})", idx, info.dev))
+        .build();
+    let row = adw::ActionRow::builder()
+        .title(if info.model.is_empty() { info.dev.clone() } else { info.model.clone() })
+        .subtitle(format!("{} • {}", info.kind, fmt_bytes(info.capacity)))
+        .build();
+    g_head.add(&row);
+    page.add(&g_head);
+
+    let g_active = adw::PreferencesGroup::builder().title("Waktu Aktif (1 menit)").build();
+    let active_area = gtk::DrawingArea::new();
+    active_area.set_content_height(130);
+    active_area.set_hexpand(true);
+    active_area.add_css_class("cpu-graph-frame");
+    active_area.set_margin_top(6);
+    active_area.set_margin_bottom(6);
+    {
+        let sh = shared.clone();
+        active_area.set_draw_func(move |_a, cr, w, h| {
+            if let Ok(g) = sh.lock() {
+                if let Some(d) = g.drives.get(idx) {
+                    draw_graph(cr, w as f64, h as f64, &d.active_hist, 100.0);
+                }
+            }
+        });
+    }
+    g_active.add(&active_area);
+    page.add(&g_active);
+
+    let g_thru = adw::PreferencesGroup::builder().title("Throughput (1 menit)").build();
+    let thru_scale = gtk::Label::new(Some("0 KiB/s"));
+    thru_scale.add_css_class("dim-label");
+    g_thru.set_header_suffix(Some(&thru_scale));
+    let thru_area = gtk::DrawingArea::new();
+    thru_area.set_content_height(130);
+    thru_area.set_hexpand(true);
+    thru_area.add_css_class("cpu-graph-frame");
+    thru_area.set_margin_top(6);
+    thru_area.set_margin_bottom(6);
+    {
+        let sh = shared.clone();
+        thru_area.set_draw_func(move |_a, cr, w, h| {
+            if let Ok(g) = sh.lock() {
+                if let Some(d) = g.drives.get(idx) {
+                    let mx = d.thru_hist.iter().cloned().fold(1.0_f64, f64::max) * 1.15;
+                    draw_graph(cr, w as f64, h as f64, &d.thru_hist, mx);
+                }
+            }
+        });
+    }
+    g_thru.add(&thru_area);
+    page.add(&g_thru);
+
+    let mut lbl = std::collections::HashMap::new();
+    let g_stat = adw::PreferencesGroup::builder().title("Statistik").build();
+    lbl.insert("rspeed", info_row("Kecepatan Baca", &g_stat));
+    lbl.insert("wspeed", info_row("Kecepatan Tulis", &g_stat));
+    lbl.insert("tread", info_row("Total Dibaca", &g_stat));
+    lbl.insert("twrite", info_row("Total Ditulis", &g_stat));
+    lbl.insert("active", info_row("Waktu Aktif", &g_stat));
+    lbl.insert("resp", info_row("Rata-rata Respons", &g_stat));
+    page.add(&g_stat);
+
+    let g_det = adw::PreferencesGroup::builder().title("Detail").build();
+    let det = |t: &str, v: &str, gr: &adw::PreferencesGroup| {
+        let l = info_row(t, gr);
+        l.set_text(v);
+    };
+    det("Kapasitas", &fmt_bytes(info.capacity), &g_det);
+    det("Terformat", &fmt_bytes(info.formatted), &g_det);
+    det("Disk Sistem", if info.is_system { "Ya" } else { "Tidak" }, &g_det);
+    det("Tipe", &info.kind, &g_det);
+    det("WWN", if info.wwn.is_empty() { "—" } else { &info.wwn }, &g_det);
+    det("Serial", if info.serial.is_empty() { "—" } else { &info.serial }, &g_det);
+    if info.rotational {
+        det("Rotasi", "HDD (berputar)", &g_det);
+    }
+    page.add(&g_det);
+
+    let mut parts = Vec::new();
+    if !info.partitions.is_empty() {
+        let g_part = adw::PreferencesGroup::builder().title("Partisi").build();
+        for p in &info.partitions {
+            let sub = if p.mount.is_empty() {
+                if p.fstype.is_empty() { "tidak terpasang".to_string() } else { p.fstype.clone() }
+            } else {
+                format!("{} • {}", if p.fstype.is_empty() { "?" } else { &p.fstype }, p.mount)
+            };
+            let r = adw::ActionRow::builder()
+                .title(format!("/dev/{}", p.name))
+                .subtitle(sub)
+                .build();
+            let bx = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            let bar = gtk::LevelBar::builder()
+                .min_value(0.0)
+                .max_value(100.0)
+                .valign(gtk::Align::Center)
+                .build();
+            bar.set_size_request(90, 12);
+            let sz = gtk::Label::new(Some(&fmt_bytes(p.size)));
+            sz.add_css_class("dim-label");
+            bx.append(&bar);
+            bx.append(&sz);
+            r.add_suffix(&bx);
+            g_part.add(&r);
+            parts.push((bar, sz));
+        }
+        page.add(&g_part);
+    }
+
+    let du = DriveUi {
+        idx,
+        active_area,
+        thru_area,
+        thru_scale,
+        lbl,
+        parts,
+    };
+    (page, du)
+}
+
 fn build_ui(app: &adw::Application) {
     // Force full-dark scheme regardless of the system theme.
     adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
@@ -1876,6 +2342,7 @@ fn build_ui(app: &adw::Application) {
         swap_hist: VecDeque::from(vec![0.0; HISTORY]),
         ..Default::default()
     }));
+    gather_drives_static(&shared);
     spawn_sampler(shared.clone());
 
     let window = adw::ApplicationWindow::builder()
@@ -1901,6 +2368,19 @@ fn build_ui(app: &adw::Application) {
     let (memory_page, row_mem, mem_bar, mem_area, swap_area, mem_lbl) = build_memory_page(&shared);
     let mep = stack.add_titled(&memory_page, Some("memory"), "Memory");
     mep.set_icon_name(Some("drive-harddisk-symbolic"));
+
+    // ── Drive pages (after Memory, one per physical disk) ──
+    let drive_snapshot: Vec<DriveInfo> = shared.lock().map(|g| g.drives.clone()).unwrap_or_default();
+    let mut drive_uis: Vec<DriveUi> = Vec::new();
+    let mut drive_tabs: Vec<(String, String)> = Vec::new(); // (stack name, sidebar label)
+    for (i, info) in drive_snapshot.iter().enumerate() {
+        let (dpage, du) = build_drive_page(&shared, i, info);
+        let sname = format!("drive{i}");
+        let dp = stack.add_titled(&dpage, Some(&sname), &format!("Drive {i}"));
+        dp.set_icon_name(Some("drive-harddisk-symbolic"));
+        drive_tabs.push((sname, format!("{} {} ({})", info.kind, i, info.dev)));
+        drive_uis.push(du);
+    }
 
     // ── Power page ──
     let power_page = adw::PreferencesPage::new();
@@ -2152,15 +2632,20 @@ fn build_ui(app: &adw::Application) {
     let sidebar = gtk::ListBox::new();
     sidebar.add_css_class("navigation-sidebar");
     sidebar.set_selection_mode(gtk::SelectionMode::Single);
-    let tabs = [
-        ("cpu", "CPU", "lucide-cpu"),
-        ("memory", "Memory", "lucide-memory-stick"),
-        ("power", "Daya & Baterai", "lucide-battery-charging"),
-        ("rgb", "Keyboard RGB", "lucide-keyboard"),
-        ("mouse", "Mouse Logitech", "lucide-mouse"),
-        ("services", "Layanan Sistem", "lucide-server"),
+    let mut tabs: Vec<(String, String, String)> = vec![
+        ("cpu".into(), "CPU".into(), "lucide-cpu".into()),
+        ("memory".into(), "Memory".into(), "lucide-memory-stick".into()),
     ];
-    for (name, label, icon) in tabs {
+    for (sname, label) in &drive_tabs {
+        tabs.push((sname.clone(), label.clone(), "lucide-hard-drive".into()));
+    }
+    tabs.extend([
+        ("power".to_string(), "Daya & Baterai".to_string(), "lucide-battery-charging".to_string()),
+        ("rgb".to_string(), "Keyboard RGB".to_string(), "lucide-keyboard".to_string()),
+        ("mouse".to_string(), "Mouse Logitech".to_string(), "lucide-mouse".to_string()),
+        ("services".to_string(), "Layanan Sistem".to_string(), "lucide-server".to_string()),
+    ]);
+    for (name, label, icon) in &tabs {
         let row = gtk::ListBoxRow::new();
         row.set_widget_name(name);
         let bx = gtk::Box::new(gtk::Orientation::Horizontal, 12);
@@ -2271,6 +2756,7 @@ fn build_ui(app: &adw::Application) {
         mem_area,
         swap_area,
         mem_lbl,
+        drives: drive_uis,
     });
 
     let sh = shared.clone();
