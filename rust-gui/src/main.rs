@@ -2684,12 +2684,15 @@ impl Ui {
         let mut pos = 2i32; // after CPU(0), Memory(1)
         if !gpus.is_empty() {
             let inner = adw::ViewStack::new();
+            let mut tabs = Vec::new();
             for (i, info) in gpus.iter().enumerate() {
                 let (page, gu) = build_gpu_page(&self.shared, i, info);
-                inner.add_titled(&page, Some(&format!("g{i}")), &format!("GPU {i} ({})", info.kind));
+                let name = format!("g{i}");
+                inner.add_titled(&page, Some(&name), &format!("GPU {i} ({})", info.kind));
+                tabs.push((name, format!("GPU {i} ({})", info.kind)));
                 self.gpus.borrow_mut().push(gu);
             }
-            let container = group_container(&inner, gpus.len() > 1);
+            let container = group_container(&inner, &tabs, "lucide-gpu");
             self.stack.add_titled(&container, Some("gpu"), "GPU");
             let row = sidebar_row("gpu", "GPU", "lucide-gpu");
             self.sidebar.insert(&row, pos);
@@ -2699,12 +2702,15 @@ impl Ui {
         }
         if !fans.is_empty() {
             let inner = adw::ViewStack::new();
+            let mut tabs = Vec::new();
             for (i, info) in fans.iter().enumerate() {
                 let (page, fu) = build_fan_page(&self.shared, i, info);
-                inner.add_titled(&page, Some(&format!("f{i}")), &format!("Fan {i} ({})", info.label));
+                let name = format!("f{i}");
+                inner.add_titled(&page, Some(&name), &format!("Fan {i} ({})", info.label));
+                tabs.push((name, format!("Fan {i} ({})", info.label)));
                 self.fans.borrow_mut().push(fu);
             }
-            let container = group_container(&inner, fans.len() > 1);
+            let container = group_container(&inner, &tabs, "lucide-fan");
             self.stack.add_titled(&container, Some("fan"), "Fan");
             let row = sidebar_row("fan", "Fan", "lucide-fan");
             self.sidebar.insert(&row, pos);
@@ -2714,12 +2720,15 @@ impl Ui {
         }
         if !nets.is_empty() {
             let inner = adw::ViewStack::new();
+            let mut tabs = Vec::new();
             for (i, info) in nets.iter().enumerate() {
                 let (page, nu) = build_net_page(&self.shared, i, info);
-                inner.add_titled(&page, Some(&format!("n{i}")), &format!("{} ({})", info.kind, info.iface));
+                let name = format!("n{i}");
+                inner.add_titled(&page, Some(&name), &format!("{} ({})", info.kind, info.iface));
+                tabs.push((name, format!("{} ({})", info.kind, info.iface)));
                 self.nets.borrow_mut().push(nu);
             }
-            let container = group_container(&inner, nets.len() > 1);
+            let container = group_container(&inner, &tabs, "lucide-network");
             self.stack.add_titled(&container, Some("net"), "Jaringan");
             let row = sidebar_row("net", "Jaringan", "lucide-network");
             self.sidebar.insert(&row, pos);
@@ -2729,12 +2738,15 @@ impl Ui {
         }
         if !drives.is_empty() {
             let inner = adw::ViewStack::new();
+            let mut tabs = Vec::new();
             for (i, info) in drives.iter().enumerate() {
                 let (page, du) = build_drive_page(&self.shared, i, info);
-                inner.add_titled(&page, Some(&format!("d{i}")), &format!("{} {} ({})", info.kind, i, info.dev));
+                let name = format!("d{i}");
+                inner.add_titled(&page, Some(&name), &format!("{} {} ({})", info.kind, i, info.dev));
+                tabs.push((name, format!("{} {} ({})", info.kind, i, info.dev)));
                 self.drives.borrow_mut().push(du);
             }
-            let container = group_container(&inner, drives.len() > 1);
+            let container = group_container(&inner, &tabs, "lucide-hard-drive");
             self.stack.add_titled(&container, Some("drive"), "Drive");
             let row = sidebar_row("drive", "Drive", "lucide-hard-drive");
             self.sidebar.insert(&row, pos);
@@ -2744,12 +2756,15 @@ impl Ui {
         }
         if !bats.is_empty() {
             let inner = adw::ViewStack::new();
+            let mut tabs = Vec::new();
             for (i, info) in bats.iter().enumerate() {
                 let (page, bu) = build_bat_page(&self.shared, i, info);
-                inner.add_titled(&page, Some(&format!("b{i}")), &format!("Baterai {i} ({})", info.name));
+                let name = format!("b{i}");
+                inner.add_titled(&page, Some(&name), &format!("Baterai {i} ({})", info.name));
+                tabs.push((name, format!("Baterai {i} ({})", info.name)));
                 self.bats.borrow_mut().push(bu);
             }
-            let container = group_container(&inner, bats.len() > 1);
+            let container = group_container(&inner, &tabs, "lucide-battery");
             self.stack.add_titled(&container, Some("bat"), "Baterai");
             let row = sidebar_row("bat", "Baterai", "lucide-battery");
             self.sidebar.insert(&row, pos);
@@ -3814,20 +3829,43 @@ fn sidebar_row(name: &str, label: &str, icon: &str) -> gtk::ListBoxRow {
     row
 }
 
-// Wrap an inner ViewStack in a vertical box, adding a top ViewSwitcher tab-bar
-// when there is more than one page (shown in-page, not in the title bar).
-fn group_container(inner: &adw::ViewStack, multi: bool) -> gtk::Box {
+// Wrap an inner ViewStack in a vertical box. When there is more than one page,
+// add an in-page segmented tab-bar of toggle buttons, each showing the parent
+// family's lucide icon plus the page title (icon loaded from file, same as the
+// sidebar, so it is never a greyed-out themed placeholder).
+fn group_container(inner: &adw::ViewStack, tabs: &[(String, String)], icon: &str) -> gtk::Box {
     let c = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    if multi {
-        let switcher = adw::ViewSwitcher::builder()
-            .stack(inner)
-            .policy(adw::ViewSwitcherPolicy::Wide)
-            .build();
+    if tabs.len() > 1 {
         let bar = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         bar.set_halign(gtk::Align::Center);
         bar.set_margin_top(8);
         bar.set_margin_bottom(4);
-        bar.append(&switcher);
+        bar.add_css_class("linked");
+        let mut first: Option<gtk::ToggleButton> = None;
+        for (name, title) in tabs {
+            let content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            content.set_margin_start(4);
+            content.set_margin_end(4);
+            content.append(&lucide(icon, 16));
+            content.append(&gtk::Label::new(Some(title)));
+            let btn = gtk::ToggleButton::new();
+            btn.set_child(Some(&content));
+            match &first {
+                Some(f) => btn.set_group(Some(f)),
+                None => {
+                    btn.set_active(true);
+                    first = Some(btn.clone());
+                }
+            }
+            let inner2 = inner.clone();
+            let nm = name.clone();
+            btn.connect_toggled(move |b| {
+                if b.is_active() {
+                    inner2.set_visible_child_name(&nm);
+                }
+            });
+            bar.append(&btn);
+        }
         c.append(&bar);
     }
     c.append(inner);
