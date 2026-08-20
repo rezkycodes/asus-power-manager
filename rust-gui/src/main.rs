@@ -2188,7 +2188,7 @@ fn spawn_sampler(sh: Arc<Mutex<Shared>>) {
                 }
             }
             // Disk S.M.A.R.T. — every 6th tick, gated by visibility.
-            let want_smart = !pause_hidden || visible_tab == "smart";
+            let want_smart = !pause_hidden || visible_tab == "drive";
             if want_smart && (tick % 6 == 2 || force) {
                 sample_smart(&sh);
             }
@@ -2387,7 +2387,6 @@ struct Ui {
     apps: AppsUi,
     svc_all: SvcAllUi,
     drives: RefCell<Vec<DriveUi>>,
-    smart: RefCell<Option<DiskHealthUi>>,
     gpus: RefCell<Vec<GpuUi>>,
     fans: RefCell<Vec<FanUi>>,
     nets: RefCell<Vec<NetUi>>,
@@ -3037,16 +3036,10 @@ impl Ui {
                         }
                     }
                 }
-                du.active_area.queue_draw();
-                du.thru_area.queue_draw();
-            }
-        }
-        // ── Disk Health (S.M.A.R.T.) refresh ──
-        if let Some(smu) = self.smart.borrow().as_ref() {
-            for (i, lbl) in smu.labels.iter().enumerate() {
-                if let Some(info) = g.smart_data.get(i) {
+                // ── S.M.A.R.T. Health Status for this drive ──
+                if let Some(info) = g.smart_data.iter().find(|s| s.dev == du.dev).or_else(|| g.smart_data.get(du.idx)) {
                     let sset = |k: &str, v: &str| {
-                        if let Some(l) = lbl.get(k) {
+                        if let Some(l) = du.smart_lbl.get(k) {
                             l.set_text(v);
                         }
                     };
@@ -3069,19 +3062,18 @@ impl Ui {
                         }
                         sset("written", &dash(&info.data_written));
                     }
-                    // Health label with color
-                    if let Some(h_lbl) = smu.health_labels.get(i) {
-                        if info.smartctl_missing {
-                            h_lbl.set_markup("<span foreground='#888888'>Install smartmontools</span>");
-                        } else if info.health.contains("PASSED") {
-                            h_lbl.set_markup("<span foreground='#4caf50'>PASSED</span>");
-                        } else if info.health.contains("FAILED") {
-                            h_lbl.set_markup("<span foreground='#f44336'>FAILED</span>");
-                        } else {
-                            h_lbl.set_text(&info.health);
-                        }
+                    if info.smartctl_missing {
+                        du.health_lbl.set_markup("<span foreground='#888888'>Install smartmontools</span>");
+                    } else if info.health.contains("PASSED") {
+                        du.health_lbl.set_markup("<span foreground='#4caf50'>PASSED</span>");
+                    } else if info.health.contains("FAILED") {
+                        du.health_lbl.set_markup("<span foreground='#f44336'>FAILED</span>");
+                    } else {
+                        du.health_lbl.set_text(&info.health);
                     }
                 }
+                du.active_area.queue_draw();
+                du.thru_area.queue_draw();
             }
         }
     }
@@ -3103,7 +3095,6 @@ impl Ui {
         self.nets.borrow_mut().clear();
         self.bats.borrow_mut().clear();
         self.drives.borrow_mut().clear();
-        *self.smart.borrow_mut() = None;
 
         let mut pos = 3i32; // after CPU(0), Memory(1), Speed Test(2)
         if !gpus.is_empty() {
@@ -3177,25 +3168,6 @@ impl Ui {
             pos += 1;
             self.dyn_rows.borrow_mut().push(row);
             self.dyn_pages.borrow_mut().push(container.upcast());
-        }
-        // Disk Health (S.M.A.R.T.) — always show if drives exist.
-        if !drives.is_empty() {
-            let (page, smu) = build_disk_health_page(&self.shared, drives);
-            let container: gtk::Box = gtk::Box::new(gtk::Orientation::Vertical, 0);
-            let sw = gtk::ScrolledWindow::builder()
-                .hscrollbar_policy(gtk::PolicyType::Never)
-                .vscrollbar_policy(gtk::PolicyType::Automatic)
-                .vexpand(true)
-                .build();
-            sw.set_child(Some(&page));
-            container.append(&sw);
-            self.stack.add_titled(&container, Some("smart"), "Disk Health");
-            let row = sidebar_row("smart", "Disk Health", "lucide-heart-pulse");
-            self.sidebar.insert(&row, pos);
-            pos += 1;
-            self.dyn_rows.borrow_mut().push(row);
-            self.dyn_pages.borrow_mut().push(container.upcast());
-            *self.smart.borrow_mut() = Some(smu);
         }
         if !bats.is_empty() {
             let inner = adw::ViewStack::new();
@@ -4164,16 +4136,19 @@ fn build_memory_page(shared: &Arc<Mutex<Shared>>) -> MemPage {
 
 struct DriveUi {
     idx: usize,
+    dev: String,
     active_area: gtk::DrawingArea,
     thru_area: gtk::DrawingArea,
     thru_scale: gtk::Label,
     lbl: std::collections::HashMap<&'static str, gtk::Label>,
     parts: Vec<(gtk::LevelBar, gtk::Label)>,
+    smart_lbl: std::collections::HashMap<&'static str, gtk::Label>,
+    health_lbl: gtk::Label,
 }
 
 // Build one drive detail page (mirrors Mission Center's Disk view layout using
-// this app's card style: Active-time + Throughput graphs, stats, details,
-// partitions with usage bars).
+// this app's card style: Active-time + Throughput graphs, stats, S.M.A.R.T. health,
+// details, partitions with usage bars).
 fn build_drive_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &DriveInfo) -> (adw::PreferencesPage, DriveUi) {
     let page = adw::PreferencesPage::new();
 
@@ -4241,6 +4216,24 @@ fn build_drive_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &DriveInfo) -
     lbl.insert("resp", info_row("Avg Response", &g_stat));
     page.add(&g_stat);
 
+    // ── S.M.A.R.T. Health Card inside Drive tab ──
+    let mut smart_lbl = std::collections::HashMap::new();
+    let g_smart = adw::PreferencesGroup::builder().title("S.M.A.R.T. Health Status").build();
+    let row_h = adw::ActionRow::builder().title("Health Status").build();
+    let health_lbl = gtk::Label::new(Some("--"));
+    health_lbl.add_css_class("dim-label");
+    health_lbl.set_valign(gtk::Align::Center);
+    row_h.add_suffix(&health_lbl);
+    g_smart.add(&row_h);
+
+    smart_lbl.insert("temp", info_row("Temperature", &g_smart));
+    smart_lbl.insert("hours", info_row("Power-On Hours", &g_smart));
+    smart_lbl.insert("cycles", info_row("Power Cycles", &g_smart));
+    smart_lbl.insert("realloc", info_row("Reallocated Sectors", &g_smart));
+    smart_lbl.insert("pct", info_row("Percentage Used (SSD)", &g_smart));
+    smart_lbl.insert("written", info_row("Total Data Written", &g_smart));
+    page.add(&g_smart);
+
     let g_det = adw::PreferencesGroup::builder().title("Details").build();
     let det = |t: &str, v: &str, gr: &adw::PreferencesGroup| {
         let l = info_row(t, gr);
@@ -4264,7 +4257,7 @@ fn build_drive_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &DriveInfo) -
 
     let mut parts = Vec::new();
     if !info.partitions.is_empty() {
-        let g_part = adw::PreferencesGroup::builder().title("Partisi").build();
+        let g_part = adw::PreferencesGroup::builder().title("Partitions").build();
         for p in &info.partitions {
             let sub = if p.mount.is_empty() {
                 if p.fstype.is_empty() { "not mounted".to_string() } else { p.fstype.clone() }
@@ -4295,72 +4288,22 @@ fn build_drive_page(shared: &Arc<Mutex<Shared>>, idx: usize, info: &DriveInfo) -
 
     let du = DriveUi {
         idx,
+        dev: info.dev.clone(),
         active_area,
         thru_area,
         thru_scale,
         lbl,
         parts,
+        smart_lbl,
+        health_lbl,
     };
     (page, du)
-}
-
-// ───────────────────────── Disk Health (S.M.A.R.T.) ─────────────────────────
-struct DiskHealthUi {
-    labels: Vec<std::collections::HashMap<&'static str, gtk::Label>>,
-    health_labels: Vec<gtk::Label>,
-}
-
-fn build_disk_health_page(shared: &Arc<Mutex<Shared>>, drives: &[DriveInfo]) -> (adw::PreferencesPage, DiskHealthUi) {
-    let page = adw::PreferencesPage::new();
-    let mut all_labels = Vec::new();
-    let mut health_labels = Vec::new();
-
-    if drives.is_empty() {
-        let grp = adw::PreferencesGroup::builder().title("No Disks Detected").build();
-        page.add(&grp);
-        return (page, DiskHealthUi { labels: all_labels, health_labels });
-    }
-
-    for (i, info) in drives.iter().enumerate() {
-        let title = if info.model.is_empty() {
-            format!("{} ({})", info.dev, info.kind)
-        } else {
-            format!("{} — {} ({})", info.dev, info.model, info.kind)
-        };
-        let grp = adw::PreferencesGroup::builder().title(&title).build();
-
-        let mut lbl = std::collections::HashMap::new();
-
-        // Health row (special: green/red text)
-        let row_h = adw::ActionRow::builder().title("Health Status").build();
-        let h_lbl = gtk::Label::new(Some("--"));
-        h_lbl.add_css_class("dim-label");
-        h_lbl.set_valign(gtk::Align::Center);
-        row_h.add_suffix(&h_lbl);
-        grp.add(&row_h);
-        health_labels.push(h_lbl);
-
-        lbl.insert("temp", info_row("Temperature", &grp));
-        lbl.insert("hours", info_row("Power-On Hours", &grp));
-        lbl.insert("cycles", info_row("Power Cycles", &grp));
-        lbl.insert("realloc", info_row("Reallocated Sectors", &grp));
-        lbl.insert("pct", info_row("Percentage Used (SSD)", &grp));
-        lbl.insert("written", info_row("Total Data Written", &grp));
-
-        let _ = i; // idx stored implicitly by Vec order
-        all_labels.push(lbl);
-        page.add(&grp);
-    }
-
-    // Smartctl-missing message (hidden by default, shown when needed)
-    let _shared = shared.clone();
-    (page, DiskHealthUi { labels: all_labels, health_labels })
 }
 
 // Classify a sidebar row into a section, for the list header func.
 fn sidebar_section(name: &str) -> &'static str {
     match name {
-        "cpu" | "memory" | "gpu" | "fan" | "net" | "drive" | "smart" | "bat" | "speedtest" => "Monitoring",
+        "cpu" | "memory" | "gpu" | "fan" | "net" | "drive" | "bat" | "speedtest" => "Monitoring",
         _ => "Control & System",
     }
 }
@@ -6508,7 +6451,6 @@ fn build_ui(app: &adw::Application) {
         apps: apps_ui,
         svc_all: svc_all_ui,
         drives: RefCell::new(Vec::new()),
-        smart: RefCell::new(None),
         gpus: RefCell::new(Vec::new()),
         fans: RefCell::new(Vec::new()),
         nets: RefCell::new(Vec::new()),
